@@ -1,8 +1,8 @@
 # USER SETTINGS
-dir = "C:/Users/hmorl/Downloads/MultiCamLabelling"
+dir = r"C:\Users\hmorl\OneDrive\Desktop\MultiCamLabelling_pilotdata"
 
 # Paths
-DEFAULT_CALIBRATION_FILE_PATH = "%s/CameraCalibration/default_calibration_labels.csv" %(dir)
+DEFAULT_CALIBRATION_FILE_PATH = "%s/CameraCalibration/default_calibration_labels.csv" %(dir) #TODO: this is manually generated atm, need to generate within gui
 CALIBRATION_SAVE_PATH_TEMPLATE = "%s/CameraCalibration/{video_name}/calibration_labels.csv" %(dir)
 FRAME_SAVE_PATH_TEMPLATE = {
     "side": "%s/Side/{video_name}" %(dir),

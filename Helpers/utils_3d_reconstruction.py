@@ -12,14 +12,13 @@ class CameraData:
     """
 
     def __init__(self, snapshot_paths=[], basic=True):
-        if not basic:
+        if not basic: # Todo: decide if need to keep this, its for if you want to load images for visualization
             self.view_paths = snapshot_paths
             self.views = self.get_cameras_views()
 
         self.specs = self.get_cameras_specs()
         self.intrinsic_matrices = self.get_cameras_intrinsics()
         self.extrinsics_ini_guess = self.get_cameras_extrinsics_guess()
-        # todo might need to add conditions here so that only use views if necessary, ie if want more than just the intrinsic matrices
 
     def get_cameras_specs(self) -> dict:
         """
@@ -39,8 +38,8 @@ class CameraData:
             },
             "front": {
                 "focal_length_mm": 12,
-                "y_size_px": 320,  # ok?
-                "x_size_px": 296,  # ok?
+                "y_size_px": 320,
+                "x_size_px": 296,
                 "pixel_size_x_mm": 3.45e-3,
                 "pixel_size_y_mm": 3.45e-3,
                 "principal_point_x_px": 960,
@@ -50,8 +49,8 @@ class CameraData:
             },
             "overhead": {
                 "focal_length_mm": 16,
-                "y_size_px": 116,  # ok?
-                "x_size_px": 992,  # ok?
+                "y_size_px": 116,
+                "x_size_px": 992,
                 "pixel_size_x_mm": 4.8e-3,
                 "pixel_size_y_mm": 4.8e-3,
                 "principal_point_x_px": 960,
@@ -106,7 +105,7 @@ class CameraData:
             )
         return camera_intrinsics
 
-    def get_cameras_extrinsics_guess(self) -> dict:
+    def get_cameras_extrinsics_guess(self) -> dict: # Todo: incorporate this as testing function
         """
         Define an initial guess for the cameras' extrinsic matrices.
 
@@ -222,7 +221,7 @@ class CameraData:
             )  # transform Rodrigues vector to opencv rotation matrix
             camera_pose_full = np.vstack(
                 [np.hstack([rotm, tvec]), np.flip(np.eye(1, 4))]
-            )
+            ) # build full 4x4 extrinsic matrix which looks like [R|t; 0 0 0 1]
 
             # compute reprojection error
             belt_coords_CCS_repr, _ = cv2.projectPoints(
@@ -230,7 +229,7 @@ class CameraData:
                 rvec,
                 tvec,
                 self.intrinsic_matrices[cam],
-                np.array([]),  # we assume no distorsion
+                np.array([]),  # we assume no distortion
             )
             belt_coords_CCS_repr = np.squeeze(belt_coords_CCS_repr)
             error = np.mean(

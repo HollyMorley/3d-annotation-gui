@@ -56,7 +56,7 @@ class MainTool:
     def main_menu(self):
         self.clear_root()
         main_frame = tk.Frame(self.root)
-        main_frame.pack(pady=20)
+        main_frame.pack(pady=20, padx=30)
 
         extract_button = tk.Button(main_frame, text="Extract Frames from Videos", command=self.extract_frames_menu)
         extract_button.pack(pady=5)
@@ -1190,7 +1190,7 @@ class LabelFramesTool:
                 else:
                     print(f"Label '{label}' not found in the DataFrame for frame {frame_idx}.")
 
-    def show_tooltip(self, event):
+    def show_tooltip(self, event): # Creates popup with label name when hover over labeled point
         if event.inaxes in self.axs:
             marker_size = self.marker_size_var.get() * 10  # Assuming marker size is scaled
             for label, views in self.body_part_points[self.current_frame_index].items():
