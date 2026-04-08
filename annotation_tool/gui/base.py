@@ -12,14 +12,9 @@ from annotation_tool.gui.utils import VIEWS, view_index, apply_contrast_brightne
 
 
 class BaseAnnotationTool:
-    """Shared state and interaction handlers for multi-view annotation tools.
-
-    Subclasses must implement:
-        _refresh_display()  — redraw the current frame content
-        on_click(event)     — handle mouse clicks for placing/selecting points
-        on_drag(event)      — handle mouse drag for moving points
-        skip_frames(step)   — navigate forward/backward through frames
-    """
+    """Shared state, UI setup and mouse handling for the calibration and
+    body-part labelling tools. Subclasses must implement _refresh_display,
+    on_click, on_drag, and skip_frames."""
 
     def __init__(self, root, main_tool):
         self.root = root
@@ -38,8 +33,6 @@ class BaseAnnotationTool:
         self.current_frame_index = 0
         self.matched_frames = []
         self.frame_label = None
-
-    # ----- UI construction helpers -----
 
     def create_settings_controls(self, parent):
         """Build marker size, contrast, and brightness sliders."""
@@ -112,8 +105,6 @@ class BaseAnnotationTool:
             ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             ax.set_title(title)
 
-    # ----- Mouse interaction handlers -----
-
     def on_scroll(self, event):
         if event.inaxes:
             ax = self.axs[view_index(self.current_view.get())]
@@ -160,8 +151,6 @@ class BaseAnnotationTool:
             self.crosshair_lines.append(event.inaxes.axvline(x, color="cyan", linestyle="--", linewidth=0.5))
             self.canvas.draw_idle()
 
-    # ----- Controls that delegate to subclass -----
-
     def update_marker_size(self, val):
         current_xlim = [ax.get_xlim() for ax in self.axs]
         current_ylim = [ax.get_ylim() for ax in self.axs]
@@ -181,8 +170,6 @@ class BaseAnnotationTool:
         self.contrast_var.set(config.DEFAULT_CONTRAST)
         self.brightness_var.set(config.DEFAULT_BRIGHTNESS)
         self._refresh_display()
-
-    # ----- Abstract methods -----
 
     def _refresh_display(self):
         raise NotImplementedError

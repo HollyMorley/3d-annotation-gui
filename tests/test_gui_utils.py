@@ -1,4 +1,4 @@
-"""Tests for pure GUI utility functions."""
+"""Tests for the pure utility functions in annotation_tool/gui/utils.py."""
 
 import os
 import time
@@ -11,9 +11,6 @@ from annotation_tool.gui.utils import (
 )
 
 
-# ---------------------------------------------------------------------------
-# get_video_name_with_view
-# ---------------------------------------------------------------------------
 class TestGetVideoNameWithView:
     def test_inserts_view_before_last_segment(self):
         assert get_video_name_with_view("HM_20220801_1", "side") == "HM_20220801_side_1"
@@ -31,9 +28,6 @@ class TestGetVideoNameWithView:
         assert get_video_name_with_view("A_B_C_D_E", "front") == "A_B_C_D_front_E"
 
 
-# ---------------------------------------------------------------------------
-# parse_video_path
-# ---------------------------------------------------------------------------
 class TestParseVideoPath:
     def test_side_video(self):
         name, date, view = parse_video_path("HM_20220801_side_1.avi")
@@ -65,9 +59,6 @@ class TestParseVideoPath:
             parse_video_path("HM_20220801_unknown_1.avi")
 
 
-# ---------------------------------------------------------------------------
-# rgb_to_hex
-# ---------------------------------------------------------------------------
 class TestRgbToHex:
     def test_white(self):
         assert rgb_to_hex((1.0, 1.0, 1.0, 1.0)) == "#ffffff"
@@ -82,9 +73,6 @@ class TestRgbToHex:
         assert rgb_to_hex((0.5, 0.5, 0.5, 1.0)) == "#7f7f7f"
 
 
-# ---------------------------------------------------------------------------
-# extract_date_from_folder_path
-# ---------------------------------------------------------------------------
 class TestExtractDateFromFolderPath:
     def test_finds_date(self):
         path = os.sep.join(["C:", "data", "20220801", "video"])
@@ -103,9 +91,6 @@ class TestExtractDateFromFolderPath:
         assert extract_date_from_folder_path(path) == "20220101"
 
 
-# ---------------------------------------------------------------------------
-# find_t_for_coordinate
-# ---------------------------------------------------------------------------
 class TestFindTForCoordinate:
     def test_x_coordinate(self):
         assert find_t_for_coordinate(5, 0, (0, 0, 0), (10, 10, 10)) == pytest.approx(0.5)
@@ -127,9 +112,6 @@ class TestFindTForCoordinate:
         assert find_t_for_coordinate(10, 0, (0, 0, 0), (10, 10, 10)) == pytest.approx(1.0)
 
 
-# ---------------------------------------------------------------------------
-# get_line_equation
-# ---------------------------------------------------------------------------
 class TestGetLineEquation:
     def test_at_t0_returns_point(self):
         assert get_line_equation((1, 2, 3), (4, 5, 6))(0) == (1, 2, 3)
@@ -141,9 +123,6 @@ class TestGetLineEquation:
         assert get_line_equation((0, 0, 0), (10, 10, 10))(0.5) == (5, 5, 5)
 
 
-# ---------------------------------------------------------------------------
-# debounce
-# ---------------------------------------------------------------------------
 class TestDebounce:
     def test_first_call_executes(self):
         call_count = [0]

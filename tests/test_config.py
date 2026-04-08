@@ -1,13 +1,10 @@
-"""Tests for config consistency."""
+"""Tests for config consistency and a couple of small helper functions."""
 
 import pytest
 
 from annotation_tool import config
 
 
-# ---------------------------------------------------------------------------
-# flatten / reshape calibration points round-trip
-# ---------------------------------------------------------------------------
 class TestFlattenReshapeCalibrationPoints:
     def test_round_trip(self):
         np = pytest.importorskip("numpy")
@@ -44,9 +41,6 @@ class TestFlattenReshapeCalibrationPoints:
                 assert reshaped[label][view][1] == pytest.approx(original[label][view][1])
 
 
-# ---------------------------------------------------------------------------
-# Timestamp zeroing
-# ---------------------------------------------------------------------------
 class TestZeroTimestamps:
     def test_zeros_relative_to_first(self):
         pd = pytest.importorskip("pandas", reason="pandas required")
@@ -63,9 +57,6 @@ class TestZeroTimestamps:
         assert list(df["Timestamp"]) == [0]
 
 
-# ---------------------------------------------------------------------------
-# Config consistency checks
-# ---------------------------------------------------------------------------
 class TestConfig:
     def test_optimization_labels_subset_of_body_parts(self):
         for label in config.OPTIMIZATION_REFERENCE_LABELS:

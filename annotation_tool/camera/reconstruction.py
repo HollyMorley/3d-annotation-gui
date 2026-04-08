@@ -4,44 +4,24 @@ import cv2
 
 
 def triangulate(points_2d, projection_matrices):
-    """Linear (DLT) triangulation of a single 3D point from multiple views.
+    """Linear (DLT) triangulation of a 3D point from N >= 2 camera views.
 
-    Given N observations of the same world point across N cameras, solve for
-    the 3D location that best satisfies the projection equations in a
-    least-squares sense (Hartley & Zisserman, Multiple View Geometry, 12.2).
+    points_2d:           (N, 2) array of 2D points, one per camera
+    projection_matrices: (N, 3, 4) array of projection matrices
 
-    For each camera i with 3x4 projection matrix P_i and observed image point
-    (x_i, y_i), the projection constraint x_i = P_i X (in homogeneous coords)
-    gives two linear equations:
-
-        x_i * P_i[2, :] - P_i[0, :] = 0
-        y_i * P_i[2, :] - P_i[1, :] = 0
-
-    Stacking these rows for all cameras forms a (2N x 4) matrix A; the
-    homogeneous solution X is the right singular vector of A with the
-    smallest singular value (last row of V^T in the SVD).
-
-    Parameters
-    ----------
-    points_2d : array-like, shape (N, 2)
-        Observed 2D image points, one per camera.
-    projection_matrices : array-like, shape (N, 3, 4)
-        Camera projection matrices, one per camera.
-
-    Returns
-    -------
-    np.ndarray, shape (4,)
-        Homogeneous 3D point, normalized so the final coordinate is 1.
+    Returns the homogeneous 3D point (4,), normalised so the last entry is 1.
     """
     points_2d = np.asarray(points_2d, dtype=float)
     projection_matrices = np.asarray(projection_matrices, dtype=float)
 
+    # Build the 2N x 4 system from the standard DLT projection constraints
     rows = []
     for (x, y), P in zip(points_2d, projection_matrices):
         rows.append(x * P[2, :] - P[0, :])
         rows.append(y * P[2, :] - P[1, :])
     A = np.stack(rows, axis=0)
 
+    # Solution is the right singular vector with the smallest singular value
     _, _, vh = np.linalg.svd(A)
     X = vh[-1]
     return X / X[-1]

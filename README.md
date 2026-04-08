@@ -7,7 +7,7 @@ with real-time 3D projection lines to guide labelling.
 
 <p align="center">
   <img src="docs/gui_screenshot_edited.png" alt="Annotation GUI screenshot" width="100%"><br>
-  <em>The annotation interface: three synchronized camera views with real-time 3D projection lines to guide body part labelling.</em>
+  <em>The labelling interface, showing the three synchronized camera views and projection lines used to guide placement.</em>
 </p>
 
 <p align="center">
@@ -103,39 +103,37 @@ The tool expects the following layout under the directory set as `dir` in `annot
 
 ### Extract Frames
 
-_Choose video frames to be labelled._
+_Pick synchronized video frames to be labelled._
 
 - Choose a video file from the pop-up file manager.
-- Scroll or skip through the synchronized videos to extract frame trios for labelling.
-- In the case of frame misalignment across cameras, timestamps are used to correct alignment.
+- Scroll or skip through the synchronized videos and extract frame trios for labelling.
+- Timestamps are used to correct for any frame misalignment across cameras.
 
 ### Calibrate Cameras
 
 _Label known landmarks across all three camera views for camera pose estimation (via OpenCV's `solvePnP`)._
 
-- Choose a video file from the pop-up file manager (pick one for which you have already extracted, or plan to
-  extract, frames).
+- Choose a video file from the pop-up file manager.
 - Scroll through the video and label the calibration points in each camera view.
-- **Calibration landmarks:** the 4 corners of the first belt, the corners of the starting step edge, and the `x`
+- Calibration landmarks: the 4 corners of the first belt, the corners of the starting step edge, and the `x`
   sticker on the door.
 
 **Controls:** Right-click to place, Shift+Right-click to delete, Left-click drag to move.
 
 ### Label Body Parts
 
-_Label pre-defined body parts, with 3D projection estimates of each point displayed across the camera views to guide
-placement._
+_Label pre-defined body parts, with 3D projection estimates of each point displayed across views to guide placement._
 
-- Choose a video folder under the `CameraCalibration` directory from the pop-up file manager, to open a video for
-  which you have both extracted frames and added calibration labels.
-- **Label View** — select the camera view to label in.
-- **Projection View** — select the view to calculate projection lines from. If labels are present in the selected
-  Projection View, estimated projection lines (from the camera centre and crossing through the platform edges) will
-  display on the other two views to guide labelling.
-- **Spacer Lines** — click once, then right-click two points on the active frame. 12 equally-spaced lines along the
-  x-axis will be displayed.
-- **Optimize Calibration** — adjusts the manually labelled calibration points to minimize reprojection error between
-  camera views, improving the estimated projections.
+- Choose a video folder from the pop-up file manager (extracted frames and calibration labels must both already
+  exist for that video).
+- **Label View** — the camera view to label in.
+- **Projection View** — the view to calculate projection lines from. If labels are present in the selected
+  Projection View, projection lines (from the camera centre, crossing through the platform edges) are drawn on
+  the other two views to guide labelling.
+- **Spacer Lines** — click once, then right-click two points on the active frame to display 12 equally-spaced
+  vertical guide lines along the x-axis.
+- **Optimize Calibration** — adjusts the manually labelled calibration points to minimize reprojection error
+  between camera views, improving the projection estimates.
 - **Save Labels** — saves the labels to the video folder under the respective camera names (`Side`, `Front`,
   `Overhead`).
 
