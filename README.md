@@ -5,14 +5,17 @@
 A tkinter-based GUI for manual annotation of body parts across three synchronized camera views (side, front, overhead),
 with real-time 3D projection lines to guide labelling.
 
-![GUI screenshot](docs/gui_screenshot_edited.png)
-
 <p align="center">
-  <img src="docs/labelling_demo.gif" alt="Camera view and 3D skeleton reconstruction" width="100%">
+  <img src="docs/gui_screenshot_edited.png" alt="Annotation GUI screenshot" width="100%"><br>
+  <em>The annotation interface: three synchronized camera views with real-time 3D projection lines to guide body part labelling.</em>
 </p>
 
+<p align="center">
+  <img src="docs/labelling_demo.gif" alt="3D reconstruction of a running mouse" width="100%"><br>
+  <em>Downstream result: labels produced with this tool were used to train DeepLabCut models (single model per camera). These multi-view predictions are then triangulated to reconstruct 3D motion.</em>
+</p>
 
-_This is a personal research tool. Future work will focus on generalising the pipeline so it can be released as a
+_Note: This is a personal research tool. Future work will focus on generalising the pipeline so it can be released as a
 reusable package._
 
 ## Setup
@@ -64,23 +67,40 @@ tests/
 
 ### Extract Frames
 
-Select a video file and scroll through synchronized multi-camera footage to extract frame trios for labelling.
-Timestamps are used to correct frame misalignment across cameras with different frame rates.
+_Choose video frames to be labelled._
+
+- Choose a video file from the pop-up file manager.
+- Scroll or skip through the synchronized videos to extract frame trios for labelling.
+- In the case of frame misalignment across cameras, timestamps are used to correct alignment.
 
 ### Calibrate Cameras
 
-Label known landmarks (belt corners, step edges, door marker) across all three camera views for camera pose estimation
-via OpenCV's solvePnP.
+_Label known landmarks across all three camera views for camera pose estimation (via OpenCV's `solvePnP`)._
+
+- Choose a video file from the pop-up file manager (pick one for which you have already extracted, or plan to
+  extract, frames).
+- Scroll through the video and label the calibration points in each camera view.
+- **Calibration landmarks:** the 4 corners of the first belt, the corners of the starting step edge, and the `x`
+  sticker on the door.
 
 **Controls:** Right-click to place, Shift+Right-click to delete, Left-click drag to move.
 
 ### Label Body Parts
 
-Label anatomical landmarks with real-time 3D projection lines displayed across views to guide placement.
+_Label pre-defined body parts, with 3D projection estimates of each point displayed across the camera views to guide
+placement._
 
-- **Label View** — select the camera view to label in
-- **Projection View** — select the view to calculate projection lines from
-- **Spacer Lines** — right-click two points to display 12 equally-spaced guide lines
-- **Optimize Calibration** — minimize reprojection error to improve projection estimates
+- Choose a video folder under the `CameraCalibration` directory from the pop-up file manager, to open a video for
+  which you have both extracted frames and added calibration labels.
+- **Label View** — select the camera view to label in.
+- **Projection View** — select the view to calculate projection lines from. If labels are present in the selected
+  Projection View, estimated projection lines (from the camera centre and crossing through the platform edges) will
+  display on the other two views to guide labelling.
+- **Spacer Lines** — click once, then right-click two points on the active frame. 12 equally-spaced lines along the
+  x-axis will be displayed.
+- **Optimize Calibration** — adjusts the manually labelled calibration points to minimize reprojection error between
+  camera views, improving the estimated projections.
+- **Save Labels** — saves the labels to the video folder under the respective camera names (`Side`, `Front`,
+  `Overhead`).
 
 **Controls:** Right-click to place, Shift+Right-click to delete, Left-click drag to move, Hover for label name.
