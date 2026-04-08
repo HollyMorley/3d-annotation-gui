@@ -7,6 +7,7 @@ with real-time 3D projection lines to guide labelling.
 
 ![GUI screenshot](docs/gui_screenshot_edited.png)
 
+
 <p align="center">
   <a href="media/labelling_demo.mp4">
     <img src="media/labelling_demo.gif" alt="Camera view and 3D skeleton reconstruction" width="100%">
