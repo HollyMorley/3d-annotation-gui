@@ -12,3 +12,4 @@ dependencies:
   - scikit-learn
   - tk
   - pytables
+  - pytest
