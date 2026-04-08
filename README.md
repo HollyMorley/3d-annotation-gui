@@ -20,6 +20,10 @@ reusable package._
 
 ## Setup
 
+**Sample data:** a Dropbox folder with an example file structure and a pre-made calibration file is available
+[here](https://www.dropbox.com/scl/fo/ifppb8f3ss8z1ijvun3ry/AAAgY5bUVrrvuz4W0q-rYWA?rlkey=1tjdthbuqur7kuqb4a1t0bcza&dl=0).
+Update the paths in `annotation_tool/config.py` to match your local directory structure after downloading.
+
 Create environment:
 
 ```bash
@@ -49,19 +53,51 @@ annotation_tool/
 ├── config.py                # User settings, labels, paths
 ├── camera/
 │   ├── calibration.py       # BasicCalibration wrapper
-│   └── reconstruction.py    # CameraData, BeltPoints, 3D geometry
+│   └── reconstruction.py    # CameraData, BeltPoints, DLT triangulation
 └── gui/
     ├── app.py               # Main menu window
     ├── base.py              # Shared base class (pan, zoom, crosshair, sliders)
     ├── extract.py           # Frame extraction from synchronized videos
     ├── calibrate.py         # Camera calibration point labelling
     ├── label.py             # Body part labelling with 3D projections
-    ├── utils.py             # Pure utility functions
-    └── sync.py              # Timestamp synchronization and frame matching
+    ├── sync.py              # Timestamp synchronization and frame matching
+    └── utils.py             # Pure utility functions
 tests/
 ├── test_config.py           # Config consistency checks
-└── test_gui_utils.py        # Utility function tests
+├── test_gui_utils.py        # Utility function tests
+└── test_triangulation.py    # DLT triangulation tests
 ```
+
+## Data structure
+
+The tool expects the following layout under the directory set as `dir` in `annotation_tool/config.py`
+(this is how the sample dataset is organised):
+
+```
+<data_dir>/
+├── <session_name>/                          # Raw videos and timestamps for one recording
+│   ├── <name>_side_<n>.avi
+│   ├── <name>_side_<n>_Timestamps.csv
+│   ├── <name>_front_<n>.avi
+│   ├── <name>_front_<n>_Timestamps.csv
+│   ├── <name>_overhead_<n>.avi
+│   └── <name>_overhead_<n>_Timestamps.csv
+├── CameraCalibration/
+│   ├── default_calibration_labels.csv       # Fallback calibration points
+│   └── <video_name>/
+│       └── calibration_labels.csv           # Per-video calibration points
+├── Side/
+│   └── <video_name>/                        # Extracted frames + body part labels
+├── Front/
+│   └── <video_name>/
+└── Overhead/
+    └── <video_name>/
+```
+
+- `CameraCalibration/`, `Side/`, `Front/`, and `Overhead/` are created automatically by the tool as
+  you calibrate, extract, and label.
+- The raw videos and their timestamp CSVs live together in a session folder (three `.avi` files with
+  matching `_Timestamps.csv` files, one per camera view).
 
 ## Tools
 
