@@ -1,0 +1,990 @@
+"""Body part labelling tool with 3D projection assistance."""
+
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from functools import lru_cache
+
+import cv2
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+from matplotlib.backend_bases import MouseButton
+from scipy.optimize import minimize
+
+from annotation_tool import config
+from annotation_tool.camera.calibration import BasicCalibration
+from annotation_tool.camera.reconstruction import triangulate
+from annotation_tool.gui.base import BaseAnnotationTool
+from annotation_tool.gui.utils import (
+    VIEWS, view_index, get_video_name_with_view, generate_label_colors,
+    apply_contrast_brightness, extract_date_from_folder_path,
+    find_t_for_coordinate, get_line_equation, debounce,
+)
+
+
+class LabelFramesTool(BaseAnnotationTool):
+    def __init__(self, root, main_tool):
+        super().__init__(root, main_tool)
+        self.video_name = ""
+        self.video_date = ""
+        self.extracted_frames_path = {}
+        self.calibration_data = None
+        self.labels = config.BODY_PART_LABELS
+        self.label_colors = generate_label_colors(self.labels, config.CALIBRATION_LABELS)
+        self.current_label = tk.StringVar(value="Nose")
+        self.projection_view = tk.StringVar(value="side")
+        self.body_part_points = {}
+        self.calibration_points_static = {
+            label: {"side": None, "front": None, "overhead": None}
+            for label in config.CALIBRATION_LABELS
+        }
+        self.cam_reprojected_points = {"near": {}, "far": {}}
+        self.frames = {"side": [], "front": [], "overhead": []}
+        self.projection_lines = {"side": None, "front": None, "overhead": None}
+        self.P = None
+        self.tooltip = None
+        self.label_buttons = []
+        self.tooltip_window = None
+        self.frame_names = {"side": [], "front": [], "overhead": []}
+        self.frame_numbers = {"side": [], "front": [], "overhead": []}
+
+        self.spacer_lines_active = False
+        self.spacer_lines_points = []
+        self.spacer_lines = []
+
+        self.last_update_time = 0
+
+        self.label_frames_menu()
+
+    def label_frames_menu(self):
+        self.main_tool.clear_root()
+
+        calibration_folder_path = filedialog.askdirectory(title="Select Calibration Folder")
+        if not calibration_folder_path:
+            self.main_tool.main_menu()
+            return
+
+        self.video_name = os.path.basename(calibration_folder_path)
+        self.video_date = extract_date_from_folder_path(calibration_folder_path)
+        self.calibration_file_path = os.path.join(
+            calibration_folder_path, "calibration_labels.csv"
+        )
+        enhanced_calibration_file = self.calibration_file_path.replace(".csv", "_enhanced.csv")
+
+        if not os.path.exists(self.calibration_file_path) and not os.path.exists(enhanced_calibration_file):
+            messagebox.showerror("Error", "No corresponding camera calibration data found.")
+            return
+
+        base_path = os.path.dirname(os.path.dirname(calibration_folder_path))
+        video_names = {
+            view: get_video_name_with_view(self.video_name, view)
+            for view in VIEWS
+        }
+        self.extracted_frames_path = {
+            "side": os.path.normpath(os.path.join(base_path, "Side", video_names["side"])),
+            "front": os.path.normpath(os.path.join(base_path, "Front", video_names["front"])),
+            "overhead": os.path.normpath(os.path.join(base_path, "Overhead", video_names["overhead"])),
+        }
+
+        if not all(os.path.exists(p) for p in self.extracted_frames_path.values()):
+            messagebox.showerror("Error", "One or more extracted frames folders not found.")
+            return
+
+        self.current_frame_index = 0
+        self.show_loading_popup()
+        self.frames = {"side": [], "front": [], "overhead": []}
+        self.root.after(100, self.load_frames, enhanced_calibration_file)
+
+    def show_loading_popup(self):
+        self.loading_popup = tk.Toplevel(self.root)
+        self.loading_popup.geometry("300x100")
+        self.loading_popup.title("Loading")
+        tk.Label(self.loading_popup, text="Loading frames, please wait...").pack(pady=20, padx=20)
+        self.root.update_idletasks()
+
+    def load_frames(self, enhanced_calibration_file):
+        valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
+
+        for view in self.frames.keys():
+            frame_files = sorted(
+                (f for f in os.listdir(self.extracted_frames_path[view])
+                 if os.path.splitext(f)[1].lower() in valid_extensions),
+                key=lambda x: os.path.getctime(
+                    os.path.join(self.extracted_frames_path[view], x)
+                ),
+            )
+            for file in frame_files:
+                frame = cv2.imread(os.path.join(self.extracted_frames_path[view], file))
+                self.frames[view].append(frame)
+                self.frame_names[view].append(file)
+                image_number = int(os.path.splitext(file)[0].replace("img", ""))
+                self.frame_numbers[view].append(image_number)
+
+        min_frame_count = min(len(self.frames[v]) for v in self.frames if self.frames[v])
+        for view in self.frames:
+            self.frames[view] = self.frames[view][:min_frame_count]
+            self.frame_numbers[view] = self.frame_numbers[view][:min_frame_count]
+
+        print(f"Frames loaded - Side: {len(self.frames['side'])}, "
+              f"Front: {len(self.frames['front'])}, Overhead: {len(self.frames['overhead'])}")
+
+        if min_frame_count == 0:
+            messagebox.showerror("Error", "No frames found in the directories.")
+            self.loading_popup.destroy()
+            return
+
+        self.loading_popup.destroy()
+
+        self.body_part_points = {
+            frame_idx: {label: {"side": None, "front": None, "overhead": None} for label in self.labels}
+            for frame_idx in range(min_frame_count)
+        }
+
+        self.matched_frames = [(i, i, i) for i in range(min_frame_count)]
+
+        self.setup_labeling_ui()
+
+        video_names = {
+            view: os.path.basename(self.extracted_frames_path[view])
+            for view in VIEWS
+        }
+        for view in VIEWS:
+            label_file_path = os.path.join(
+                config.LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
+                "CollectedData_Holly.csv",
+            )
+            if os.path.exists(label_file_path):
+                self.load_existing_labels(label_file_path, view)
+
+        if os.path.exists(enhanced_calibration_file):
+            self.load_calibration_data(enhanced_calibration_file)
+        else:
+            self.load_calibration_data(self.calibration_file_path)
+
+        self.display_frame()
+
+    def setup_labeling_ui(self):
+        self.main_tool.clear_root()
+
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        control_frame = tk.Frame(main_frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        self.create_settings_controls(control_frame)
+
+        frame_control = tk.Frame(control_frame)
+        frame_control.pack(side=tk.LEFT, padx=20)
+
+        self.frame_label = tk.Label(
+            frame_control,
+            text=f"Frame: {self.current_frame_index + 1}/{len(self.frames['side'])}",
+        )
+        self.frame_label.pack()
+
+        tk.Button(frame_control, text="<<",
+                  command=lambda: self.skip_frames(-1)).pack(side=tk.LEFT, padx=5)
+        tk.Button(frame_control, text=">>",
+                  command=lambda: self.skip_frames(1)).pack(side=tk.LEFT, padx=5)
+
+        button_frame = tk.Frame(control_frame)
+        button_frame.pack(side=tk.LEFT, padx=20)
+
+        tk.Button(button_frame, text="Home", command=self.reset_view).pack(pady=5)
+        tk.Button(button_frame, text="Save Labels", command=self.save_labels).pack(pady=5)
+        tk.Button(button_frame, text="Spacer Lines",
+                  command=self.toggle_spacer_lines).pack(pady=5)
+        tk.Button(button_frame, text="Optimize Calibration",
+                  command=self.optimize_calibration).pack(pady=5)
+
+        # View selectors
+        view_frame = tk.Frame(control_frame)
+        view_frame.pack(side=tk.RIGHT, padx=10, pady=5)
+        tk.Label(view_frame, text="Label View").pack()
+        self.current_view = tk.StringVar(value="side")
+        for view in VIEWS:
+            tk.Radiobutton(view_frame, text=view.capitalize(),
+                           variable=self.current_view, value=view).pack(side=tk.TOP, pady=2)
+
+        projection_frame = tk.Frame(control_frame)
+        projection_frame.pack(side=tk.RIGHT, padx=10, pady=5)
+        tk.Label(projection_frame, text="Projection View").pack()
+        self.projection_view = tk.StringVar(value="side")
+        for view in VIEWS:
+            tk.Radiobutton(projection_frame, text=view.capitalize(),
+                           variable=self.projection_view, value=view).pack(side=tk.TOP, pady=2)
+
+        control_frame_right = tk.Frame(control_frame)
+        control_frame_right.pack(side=tk.RIGHT, padx=20)
+        tk.Button(control_frame_right, text="Exit", command=self.confirm_exit).pack(pady=5)
+        tk.Button(control_frame_right, text="Back to Main Menu",
+                  command=self.main_tool.main_menu).pack(pady=5)
+
+        # Scrollable label buttons
+        control_frame_labels = tk.Frame(main_frame)
+        control_frame_labels.pack(side=tk.RIGHT, fill=tk.Y, padx=3, pady=1)
+
+        self.labels = config.BODY_PART_LABELS
+        self.label_colors = generate_label_colors(self.labels, config.CALIBRATION_LABELS)
+        self.current_label = tk.StringVar(value=self.labels[0])
+
+        self.label_canvas = tk.Canvas(control_frame_labels, width=100)
+        self.label_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+        self.label_scrollbar = tk.Scrollbar(
+            control_frame_labels, orient=tk.VERTICAL, command=self.label_canvas.yview
+        )
+        self.label_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.label_canvas.configure(yscrollcommand=self.label_scrollbar.set)
+
+        self.label_frame_widget = tk.Frame(self.label_canvas)
+        self.label_canvas.create_window((0, 0), window=self.label_frame_widget, anchor="nw")
+        self.label_frame_widget.bind(
+            "<Configure>",
+            lambda e: self.label_canvas.configure(scrollregion=self.label_canvas.bbox("all")),
+        )
+
+        for label in self.labels:
+            color = self.label_colors[label]
+            if label != "Door" and label in config.CALIBRATION_LABELS:
+                continue
+            label_button = tk.Radiobutton(
+                self.label_frame_widget, text=label, variable=self.current_label,
+                value=label, indicatoron=0, width=15, bg=color, font=("Helvetica", 7),
+                command=lambda l=label: self.on_label_select(l),
+            )
+            label_button.pack(fill=tk.X, pady=1)
+            self.label_buttons.append(label_button)
+
+        self.current_label.set("Nose")
+        self.update_label_button_selection()
+
+        # Canvas
+        self.fig, self.axs = plt.subplots(3, 1, figsize=(10, 10))
+        self.fig.subplots_adjust(left=0.02, right=0.999, top=0.99, bottom=0.01,
+                                 wspace=0.01, hspace=0.005)
+        for ax in self.axs:
+            ax.tick_params(axis="both", which="major", labelsize=8)
+            ax.xaxis.set_major_locator(plt.MultipleLocator(50))
+            ax.yaxis.set_major_locator(plt.MultipleLocator(50))
+
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.canvas = FigureCanvasTkAgg(self.fig, master=main_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.tooltip = self.fig.text(
+            0, 0, "", va="bottom", ha="left", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="black", lw=1), zorder=10,
+        )
+        self.tooltip.set_visible(False)
+
+        self.connect_mouse_events()
+        self.canvas.mpl_connect("motion_notify_event", self.show_tooltip)
+
+        self.display_frame()
+
+    def update_label_button_selection(self):
+        for button in self.label_buttons:
+            if button.cget("text") == self.current_label.get():
+                button.select()
+
+    def load_existing_labels(self, label_file_path, view):
+        label_file_path = label_file_path.replace(".csv", ".h5")
+        df = pd.read_hdf(label_file_path, key="df")
+
+        for frame_idx_pos, frame_idx in enumerate(df.index):
+            for label in self.labels:
+                if ("Holly", label, "x") in df.columns and ("Holly", label, "y") in df.columns:
+                    x = df.loc[frame_idx, ("Holly", label, "x")]
+                    y = df.loc[frame_idx, ("Holly", label, "y")]
+                    if not np.isnan(x) and not np.isnan(y):
+                        self.body_part_points[frame_idx_pos][label][view] = (x, y)
+                else:
+                    print(f"Label '{label}' not found in DataFrame for frame {frame_idx}.")
+
+    # ----- Display -----
+
+    def display_frame(self):
+        frame_side, frame_front, frame_overhead = self.matched_frames[self.current_frame_index]
+
+        frame_side_img = self.frames["side"][frame_side]
+        frame_front_img = self.frames["front"][frame_front]
+        frame_overhead_img = self.frames["overhead"][frame_overhead]
+
+        self.display_three_views(frame_side_img, frame_front_img, frame_overhead_img)
+        for ax in self.axs:
+            ax.set_title(ax.get_title(), fontsize=8)
+            ax.tick_params(axis="both", which="both", direction="in",
+                           top=True, right=True, labelsize=8)
+
+        self.show_body_part_points()
+        self.canvas.draw()
+
+        self.current_label.set("Nose")
+        self.update_label_button_selection()
+
+    def _refresh_display(self):
+        self.display_frame()
+
+    def show_body_part_points(self, draw=True):
+        for ax in self.axs:
+            for collection in ax.collections:
+                collection.remove()
+
+        current_points = self.body_part_points[self.current_frame_index]
+        for label, views in current_points.items():
+            for view, coords in views.items():
+                if coords is not None:
+                    x, y = coords
+                    ax = self.axs[view_index(view)]
+                    color = self.label_colors[label]
+                    if label in config.CALIBRATION_LABELS:
+                        ax.scatter(x, y, c=color, s=self.marker_size_var.get() * 10,
+                                   label=label, edgecolors="red", linewidths=1)
+                    else:
+                        ax.scatter(x, y, c=color, s=self.marker_size_var.get() * 10,
+                                   label=label)
+        if draw:
+            self.canvas.draw_idle()
+
+    # ----- Contrast/brightness with debounce + caching -----
+
+    @debounce(0.1)
+    def update_contrast_brightness(self, val):
+        self.redraw_frame()
+
+    def redraw_frame(self):
+        current_xlim = [ax.get_xlim() for ax in self.axs]
+        current_ylim = [ax.get_ylim() for ax in self.axs]
+        self.display_frame()
+        for ax, xlim, ylim in zip(self.axs, current_xlim, current_ylim):
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+        self.canvas.draw_idle()
+
+    @debounce(0.1)
+    def on_scroll(self, event):
+        super().on_scroll(event)
+
+    # ----- Tooltip -----
+
+    def show_tooltip(self, event):
+        if event.inaxes in self.axs:
+            marker_size = self.marker_size_var.get() * 10
+            for label, views in self.body_part_points[self.current_frame_index].items():
+                for view, coords in views.items():
+                    if view == self.current_view.get() and coords is not None:
+                        x, y = coords
+                        if np.hypot(x - event.xdata, y - event.ydata) < marker_size:
+                            self.show_custom_tooltip(self.canvas.get_tk_widget(), label)
+                            return
+        self.hide_custom_tooltip()
+
+    def show_custom_tooltip(self, wdgt, text):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+        self.tooltip_window = tk.Toplevel(wdgt)
+        self.tooltip_window.overrideredirect(True)
+        tk.Label(self.tooltip_window, text=text, background="yellow").pack()
+        self.tooltip_window.update_idletasks()
+        x_center = wdgt.winfo_pointerx() + 20
+        y_center = wdgt.winfo_pointery() + 20
+        self.tooltip_window.geometry(f"+{x_center}+{y_center}")
+        wdgt.bind("<Leave>", self.hide_custom_tooltip)
+
+    def hide_custom_tooltip(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+    # ----- Mouse interaction -----
+
+    def on_click(self, event):
+        if event.inaxes not in self.axs:
+            return
+
+        view = self.current_view.get()
+        ax = self.axs[view_index(view)]
+        label = self.current_label.get()
+        color = self.label_colors[label]
+        marker_size = self.marker_size_var.get()
+        frame_points = self.body_part_points[self.current_frame_index]
+
+        if event.button == MouseButton.RIGHT:
+            if self.spacer_lines_active:
+                if len(self.spacer_lines_points) < 2:
+                    self.spacer_lines_points.append((event.xdata, event.ydata))
+                    if len(self.spacer_lines_points) == 2:
+                        self.draw_spacer_lines(
+                            ax, self.spacer_lines_points[0], self.spacer_lines_points[1]
+                        )
+                return
+            if event.key == "shift":
+                self.delete_closest_point(ax, event, frame_points)
+            else:
+                if label == "Door" or label not in config.CALIBRATION_LABELS:
+                    frame_points[label][view] = (event.xdata, event.ydata)
+                    ax.scatter(event.xdata, event.ydata, c=color, s=marker_size * 10,
+                               label=label)
+                    self.canvas.draw_idle()
+                    self.advance_label()
+                    self.draw_reprojected_points()
+        elif event.button == MouseButton.LEFT:
+            if label == "Door" or label not in config.CALIBRATION_LABELS:
+                self.dragging_point = self.find_closest_point(ax, event, frame_points)
+
+    def on_drag(self, event):
+        if self.dragging_point is None or event.inaxes not in self.axs:
+            return
+        label, view, _ = self.dragging_point
+        if event.button == MouseButton.LEFT:
+            self.body_part_points[self.current_frame_index][label][view] = (
+                event.xdata, event.ydata
+            )
+            self.show_body_part_points()
+            self.draw_reprojected_points()
+
+    def on_mouse_release(self, event):
+        super().on_mouse_release(event)
+        if event.button == MouseButton.LEFT:
+            self.dragging_point = None
+        elif event.button == MouseButton.RIGHT and self.spacer_lines_active:
+            if len(self.spacer_lines_points) == 2:
+                self.spacer_lines_points = []
+                self.spacer_lines_active = False
+
+    def find_closest_point(self, ax, event, frame_points):
+        min_dist = float("inf")
+        closest_point = None
+        for label, views in frame_points.items():
+            for view, coords in views.items():
+                if coords is not None:
+                    x, y = coords
+                    dist = np.hypot(x - event.xdata, y - event.ydata)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_point = (label, view, coords)
+        return closest_point if min_dist < 10 else None
+
+    def delete_closest_point(self, ax, event, frame_points):
+        min_dist = float("inf")
+        closest_label = None
+        closest_view = None
+        for label, views in frame_points.items():
+            for view, coords in views.items():
+                if coords is not None:
+                    x, y = coords
+                    dist = np.hypot(x - event.xdata, y - event.ydata)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_label = label
+                        closest_view = view
+
+        if closest_label and closest_view:
+            if closest_label == "Door" or closest_label not in config.CALIBRATION_LABELS:
+                frame_points[closest_label][closest_view] = None
+                self.display_frame()
+
+    def advance_label(self):
+        current_index = self.labels.index(self.current_label.get())
+        next_index = (current_index + 1) % len(self.labels)
+        if next_index != 0 or len(self.labels) == 1:
+            self.current_label.set(self.labels[next_index])
+        else:
+            self.current_label.set("")
+        self.draw_reprojected_points()
+
+    def skip_frames(self, step):
+        self.current_frame_index += step
+        self.current_frame_index = max(0, min(
+            self.current_frame_index, len(self.frames["side"]) - 1
+        ))
+        self.frame_label.config(
+            text=f"Frame: {self.current_frame_index + 1}/{len(self.frames['side'])}"
+        )
+        self.display_frame()
+        self.current_label.set("Nose")
+
+    def on_label_select(self, label):
+        self.current_label.set(label)
+        self.draw_reprojected_points()
+
+    def reset_view(self):
+        for ax in self.axs:
+            ax.set_xlim(0, ax.get_images()[0].get_array().shape[1])
+            ax.set_ylim(ax.get_images()[0].get_array().shape[0], 0)
+        self.contrast_var.set(config.DEFAULT_CONTRAST)
+        self.brightness_var.set(config.DEFAULT_BRIGHTNESS)
+        self.marker_size_var.set(config.DEFAULT_MARKER_SIZE)
+        self.display_frame()
+
+    # ----- Spacer lines -----
+
+    def toggle_spacer_lines(self):
+        self.spacer_lines_active = not self.spacer_lines_active
+        if not self.spacer_lines_active:
+            self.remove_spacer_lines()
+            self.spacer_lines_points = []
+        else:
+            self.spacer_lines_points = []
+
+    def remove_spacer_lines(self):
+        for line in self.spacer_lines:
+            line.remove()
+        self.spacer_lines = []
+        self.canvas.draw_idle()
+
+    def draw_spacer_lines(self, ax, start_point, end_point):
+        if self.spacer_lines:
+            self.remove_spacer_lines()
+        x_values = np.linspace(start_point[0], end_point[0], num=12)
+        for x in x_values:
+            line = ax.axvline(x=x, color="pink", linestyle=":", linewidth=1)
+            self.spacer_lines.append(line)
+        self.canvas.draw_idle()
+
+    # ----- 3D projection -----
+
+    def get_p(self, view, extrinsics=None, return_value=False):
+        if extrinsics is None:
+            extrinsics = self.calibration_data["extrinsics"]
+        if self.calibration_data:
+            K = self.calibration_data["intrinsics"][view]
+            R = extrinsics[view]["rotm"]
+            t = extrinsics[view]["tvec"]
+            if t.ndim == 1:
+                t = t[:, np.newaxis]
+            P = np.dot(K, np.hstack((R, t)))
+            if return_value:
+                return P
+            else:
+                self.P = P
+
+    def get_camera_center(self, view):
+        if self.calibration_data:
+            R = self.calibration_data["extrinsics"][view]["rotm"]
+            t = self.calibration_data["extrinsics"][view]["tvec"]
+            camera_center = -np.dot(np.linalg.inv(R), t)
+            return camera_center.flatten()
+
+    def find_projection(self, view, bp):
+        self.get_p(view)
+        if self.body_part_points[self.current_frame_index][bp][view] is not None:
+            x, y = self.body_part_points[self.current_frame_index][bp][view]
+            if x is not None and y is not None:
+                uv = np.array([x, y, 1.0])
+                P_inv = np.linalg.pinv(self.P)
+                X = np.dot(P_inv, uv)
+                X /= X[-1]
+                return X[:3]
+        return None
+
+    def find_3d_edges(self, view, bp):
+        point_3d = self.find_projection(view, bp)
+        camera_center = self.get_camera_center(view)
+
+        if point_3d is not None and camera_center is not None:
+            line_at_t = get_line_equation(point_3d, camera_center)
+
+            if view == "side":
+                coord_index = 1
+            elif view == "front":
+                coord_index = 0
+            elif view == "overhead":
+                coord_index = 2
+
+            near_edge = line_at_t(
+                find_t_for_coordinate(0, coord_index, point_3d, camera_center)
+            )
+
+            far_edge_value = self.calibration_data["belt points WCS"].T[coord_index].max()
+            if view == "front":
+                far_edge_value += 140
+            if view == "overhead":
+                far_edge_value = 60
+            far_edge = line_at_t(
+                find_t_for_coordinate(far_edge_value, coord_index, point_3d, camera_center)
+            )
+            return near_edge, far_edge
+
+        return None, None
+
+    def reproject_3d_to_2d(self):
+        view = self.projection_view.get()
+        bp = self.current_label.get()
+
+        self.cam_reprojected_points["near"] = {}
+        self.cam_reprojected_points["far"] = {}
+
+        near_edge, far_edge = self.find_3d_edges(view, bp)
+        if near_edge is not None and far_edge is not None:
+            other_views = [v for v in VIEWS if v != view]
+            for wcs in [near_edge, far_edge]:
+                key = "near" if wcs is near_edge else "far"
+                for other_view in other_views:
+                    CCS_repr, _ = cv2.projectPoints(
+                        wcs,
+                        cv2.Rodrigues(self.calibration_data["extrinsics"][other_view]["rotm"])[0],
+                        self.calibration_data["extrinsics"][other_view]["tvec"],
+                        self.calibration_data["intrinsics"][other_view],
+                        np.array([]),
+                    )
+                    self.cam_reprojected_points[key][other_view] = CCS_repr[0].flatten()
+
+    def draw_reprojected_points(self):
+        self.reproject_3d_to_2d()
+        for view in VIEWS:
+            if view != self.projection_view.get():
+                ax = self.axs[view_index(view)]
+                if self.projection_lines[view] is not None:
+                    self.projection_lines[view].remove()
+                    self.projection_lines[view] = None
+
+                frame = cv2.cvtColor(
+                    self.frames[view][self.current_frame_index], cv2.COLOR_BGR2RGB
+                )
+                frame = apply_contrast_brightness(
+                    frame, self.contrast_var.get(), self.brightness_var.get()
+                )
+                ax.imshow(frame)
+                ax.set_title(f"{view.capitalize()} View", fontsize=8)
+                ax.axis("on")
+
+                if (view in self.cam_reprojected_points["near"]
+                        and view in self.cam_reprojected_points["far"]):
+                    near_point = self.cam_reprojected_points["near"][view]
+                    far_point = self.cam_reprojected_points["far"][view]
+                    self.projection_lines[view], = ax.plot(
+                        [near_point[0], far_point[0]], [near_point[1], far_point[1]],
+                        color="red", linestyle="--", linewidth=0.5,
+                    )
+
+                ax.tick_params(axis="both", which="both", direction="in",
+                               top=True, right=True, labelsize=8)
+
+        self.show_body_part_points()
+        self.canvas.draw_idle()
+
+    # ----- Calibration -----
+
+    def load_calibration_data(self, calibration_data_path):
+        try:
+            calibration_coordinates = pd.read_csv(calibration_data_path)
+            calib = BasicCalibration(calibration_coordinates)
+            cameras_extrinsics = calib.estimate_cams_pose()
+
+            self.calibration_data = {
+                "extrinsics": cameras_extrinsics,
+                "intrinsics": calib.cameras_intrinsics,
+                "belt points WCS": calib.belt_coords_WCS,
+                "belt points CCS": calib.belt_coords_CCS,
+            }
+
+            for label in config.CALIBRATION_LABELS:
+                for view in VIEWS:
+                    x_vals = calibration_coordinates[
+                        (calibration_coordinates["bodyparts"] == label)
+                        & (calibration_coordinates["coords"] == "x")
+                    ][view].values
+                    y_vals = calibration_coordinates[
+                        (calibration_coordinates["bodyparts"] == label)
+                        & (calibration_coordinates["coords"] == "y")
+                    ][view].values
+
+                    if len(x_vals) > 0 and len(y_vals) > 0:
+                        x, y = x_vals[0], y_vals[0]
+                        self.calibration_points_static[label][view] = (x, y)
+                        if label != "Door":
+                            for frame in self.body_part_points.keys():
+                                self.body_part_points[frame][label][view] = (x, y)
+                    else:
+                        self.calibration_points_static[label][view] = None
+                        print(f"Missing data for {label} in {view} view")
+
+            self.update_projection_matrices()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load calibration data: {e}")
+            print(f"Error loading calibration data: {e}")
+
+    def update_projection_matrices(self):
+        for view in VIEWS:
+            self.get_p(view)
+
+    # ----- Calibration optimization -----
+
+    def optimize_calibration(self):
+        reference_points = config.OPTIMIZATION_REFERENCE_LABELS
+
+        initial_total_error, initial_errors = self.compute_reprojection_error(reference_points)
+        print(f"Initial total reprojection error: {initial_total_error}")
+        for label, views in initial_errors.items():
+            print(f"  {label}: {views}")
+
+        initial_flat_points = self.flatten_calibration_points()
+        bounds = [
+            (initial_flat_points[i] - 3.0, initial_flat_points[i] + 3.0)
+            for i in range(len(initial_flat_points))
+        ]
+
+        result = minimize(
+            self.objective_function, initial_flat_points,
+            args=(reference_points,), method="L-BFGS-B", bounds=bounds,
+            options={"maxiter": 15000, "ftol": 1e-8, "gtol": 1e-5, "disp": False},
+        )
+
+        optimized_points = self.reshape_calibration_points(result.x)
+        for label, views in optimized_points.items():
+            for view, point in views.items():
+                self.calibration_points_static[label][view] = point
+
+        self.recalculate_camera_parameters()
+
+        new_total_error, new_errors = self.compute_reprojection_error(reference_points)
+        print(f"Optimized total reprojection error: {new_total_error}")
+        for label, views in new_errors.items():
+            print(f"  {label}: {views}")
+
+        self.save_optimized_calibration_points()
+        self.update_calibration_labels_and_projection()
+
+    def compute_reprojection_error(self, labels, extrinsics=None, weighted=False):
+        errors = {label: {"side": 0, "front": 0, "overhead": 0} for label in labels}
+        total_error = 0
+
+        for label in labels:
+            point_3d = self.triangulate_point(label, extrinsics)
+            if point_3d is not None:
+                point_3d = point_3d[:3]
+                projections = self.project_to_view(point_3d, extrinsics)
+                for view in VIEWS:
+                    if self.body_part_points[self.current_frame_index][label][view] is not None:
+                        original_x, original_y = self.body_part_points[self.current_frame_index][label][view]
+                        if view in projections:
+                            projected_x, projected_y = projections[view]
+                            error = np.sqrt(
+                                (projected_x - original_x) ** 2
+                                + (projected_y - original_y) ** 2
+                            )
+                            if weighted:
+                                weight = config.REFERENCE_LABEL_WEIGHTS.get(label, 1.0)
+                                error *= weight
+                            errors[label][view] = error
+                            total_error += error
+        return total_error, errors
+
+    def triangulate_point(self, label, extrinsics=None):
+        P_list = []
+        coords = []
+        for view in VIEWS:
+            if self.body_part_points[self.current_frame_index][label][view] is not None:
+                P_list.append(self.get_p(view, extrinsics=extrinsics, return_value=True))
+                coords.append(self.body_part_points[self.current_frame_index][label][view])
+
+        if len(P_list) < 2 or len(coords) < 2:
+            return None
+
+        P_arr = np.array(P_list)
+        coords_arr = np.array(coords)
+        return triangulate(coords_arr, P_arr)
+
+    def project_to_view(self, point_3d, extrinsics=None):
+        projections = {}
+        for view in VIEWS:
+            if extrinsics is None:
+                extrinsics = self.calibration_data["extrinsics"]
+            if extrinsics[view] is not None:
+                CCS_repr, _ = cv2.projectPoints(
+                    point_3d,
+                    cv2.Rodrigues(extrinsics[view]["rotm"])[0],
+                    extrinsics[view]["tvec"],
+                    self.calibration_data["intrinsics"][view],
+                    np.array([]),
+                )
+                projections[view] = CCS_repr[0].flatten()
+        return projections
+
+    def flatten_calibration_points(self):
+        flat_points = []
+        for label in config.CALIBRATION_LABELS:
+            for view in VIEWS:
+                if self.calibration_points_static[label][view] is not None:
+                    flat_points.extend(self.calibration_points_static[label][view])
+        return np.array(flat_points, dtype=float)
+
+    def reshape_calibration_points(self, flat_points):
+        calibration_points = {
+            label: {"side": None, "front": None, "overhead": None}
+            for label in config.CALIBRATION_LABELS
+        }
+        i = 0
+        for label in config.CALIBRATION_LABELS:
+            for view in VIEWS:
+                if self.calibration_points_static[label][view] is not None:
+                    calibration_points[label][view] = [flat_points[i], flat_points[i + 1]]
+                    i += 2
+        return calibration_points
+
+    def objective_function(self, flat_points, *args):
+        reference_points = args[0]
+        calibration_points = self.reshape_calibration_points(flat_points)
+        temp_extrinsics = self.estimate_extrinsics(calibration_points)
+        total_error, _ = self.compute_reprojection_error(
+            reference_points, temp_extrinsics, weighted=True
+        )
+        return total_error
+
+    def estimate_extrinsics(self, calibration_points):
+        calibration_coordinates = pd.DataFrame([
+            {
+                "bodyparts": label, "coords": coord,
+                "side": calibration_points[label]["side"][i],
+                "front": calibration_points[label]["front"][i],
+                "overhead": calibration_points[label]["overhead"][i],
+            }
+            for label in calibration_points
+            for i, coord in enumerate(["x", "y"])
+        ])
+        calib = BasicCalibration(calibration_coordinates)
+        return calib.estimate_cams_pose()
+
+    def recalculate_camera_parameters(self):
+        calibration_coordinates = pd.DataFrame([
+            {
+                "bodyparts": label, "coords": coord,
+                "side": self.calibration_points_static[label]["side"][i],
+                "front": self.calibration_points_static[label]["front"][i],
+                "overhead": self.calibration_points_static[label]["overhead"][i],
+            }
+            for label in self.calibration_points_static
+            for i, coord in enumerate(["x", "y"])
+        ])
+        calib = BasicCalibration(calibration_coordinates)
+        cameras_extrinsics = calib.estimate_cams_pose()
+        self.calibration_data = {
+            "extrinsics": cameras_extrinsics,
+            "intrinsics": calib.cameras_intrinsics,
+            "belt points WCS": calib.belt_coords_WCS,
+            "belt points CCS": calib.belt_coords_CCS,
+        }
+
+    def save_optimized_calibration_points(self):
+        calibration_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+            video_name=self.video_name
+        ).replace(".csv", "_enhanced.csv")
+        os.makedirs(os.path.dirname(calibration_path), exist_ok=True)
+
+        data = {"bodyparts": [], "coords": [], "side": [], "front": [], "overhead": []}
+        for label, coords in self.calibration_points_static.items():
+            if label in config.CALIBRATION_LABELS:
+                for coord in ["x", "y"]:
+                    data["bodyparts"].append(label)
+                    data["coords"].append(coord)
+                    for view in VIEWS:
+                        if coords[view] is not None:
+                            x, y = coords[view]
+                            data[view].append(x if coord == "x" else y)
+                        else:
+                            data[view].append(None)
+
+        df = pd.DataFrame(data)
+        try:
+            df.to_csv(calibration_path, index=False)
+            messagebox.showinfo("Info", "Optimized calibration points saved successfully")
+        except PermissionError:
+            print(f"Permission denied: {calibration_path}")
+            messagebox.showerror("Error", f"Unable to save: {calibration_path}")
+
+    def update_calibration_labels_and_projection(self):
+        enhanced_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+            video_name=self.video_name
+        ).replace(".csv", "_enhanced.csv")
+        if os.path.exists(enhanced_path):
+            self.load_calibration_data(enhanced_path)
+            self.update_projection_matrices()
+            self.display_frame()
+        else:
+            print(f"Enhanced calibration file not found: {enhanced_path}")
+
+    # ----- Save / Exit -----
+
+    def save_labels(self):
+        video_names = {
+            view: os.path.basename(self.extracted_frames_path[view])
+            for view in VIEWS
+        }
+        save_paths = {
+            view: os.path.join(
+                config.LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
+                "CollectedData_Holly.csv",
+            )
+            for view in VIEWS
+        }
+        for path in save_paths.values():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        data = {view: [] for view in VIEWS}
+        for frame_idx, labels in self.body_part_points.items():
+            for label, views in labels.items():
+                for view, coords in views.items():
+                    if coords is not None:
+                        x, y = coords
+                        frame_number = self.matched_frames[frame_idx][view_index(view)]
+                        filename = self.frame_names[view][frame_number]
+                        video_filename = os.path.basename(self.extracted_frames_path[view])
+                        data[view].append((frame_idx, label, x, y, "Holly",
+                                           video_filename, filename))
+
+        for view, view_data in data.items():
+            df_view = pd.DataFrame(
+                view_data,
+                columns=["frame_index", "label", "x", "y", "scorer",
+                          "video_filename", "frame_filename"],
+            )
+
+            multi_cols = pd.MultiIndex.from_product(
+                [["Holly"], self.labels, ["x", "y"]],
+                names=["scorer", "bodyparts", "coords"],
+            )
+            multi_idx = pd.MultiIndex.from_tuples([
+                ("labeled_data", video_names[view], filename)
+                for filename in df_view["frame_filename"].unique()
+            ])
+            df_ordered = pd.DataFrame(index=multi_idx, columns=multi_cols)
+
+            for _, row in df_view.iterrows():
+                df_ordered.loc[
+                    ("labeled_data", row.video_filename, row.frame_filename),
+                    ("Holly", row.label, "x"),
+                ] = row.x
+                df_ordered.loc[
+                    ("labeled_data", row.video_filename, row.frame_filename),
+                    ("Holly", row.label, "y"),
+                ] = row.y
+
+            df_ordered = df_ordered.apply(pd.to_numeric)
+
+            save_path = save_paths[view]
+            print(f"Saving to {save_path}")
+            try:
+                df_ordered.to_csv(save_path)
+                df_ordered.to_hdf(
+                    save_path.replace(".csv", ".h5"), key="df", mode="w", format="fixed"
+                )
+            except PermissionError as e:
+                print(f"PermissionError: {e}")
+                messagebox.showerror("Error",
+                                     f"Unable to save: {save_path}. Check file permissions.")
+
+        print("Labels saved successfully")
+        messagebox.showinfo("Info", "Labels saved successfully")
+
+    def confirm_exit(self):
+        answer = messagebox.askyesnocancel("Exit",
+                                            "Do you want to save labels before exiting?")
+        if answer is not None:
+            if answer:
+                self.save_labels()
+            self.root.quit()

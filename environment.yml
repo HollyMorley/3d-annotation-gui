@@ -1,21 +1,14 @@
-name: MultiCamLabelling
+name: 3d-annotation-gui
 channels:
-  - defaults
   - conda-forge
 dependencies:
-  - python=3.8.5
+  - python>=3.11
+  - numpy>=2.0
   - opencv
   - pandas
-  - numpy
   - matplotlib
   - pillow
-  - h5py
   - scipy
   - scikit-learn
-  - tqdm
   - tk
-  - scikit-image
   - pytables
-  - pip
-  - pip:
-      - pycalib
