@@ -5,6 +5,15 @@
 A tkinter-based GUI for manual annotation of body parts across three synchronized camera views (side, front, overhead),
 with real-time 3D projection lines to guide labelling.
 
+![GUI screenshot](docs/gui_screenshot_edited.png)
+
+<p align="center">
+  <a href="media/labelling_demo.mp4">
+    <img src="media/labelling_demo.gif" alt="Camera view and 3D skeleton reconstruction" width="100%">
+  </a>
+</p>
+
+
 _This is a personal research tool. Future work will focus on generalising the pipeline so it can be released as a
 reusable package._
 
