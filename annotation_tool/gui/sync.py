@@ -30,7 +30,7 @@ def adjust_timestamps(side_timestamps, other_timestamps):
     side_single = side_timestamps[mask]
     diff = other_single["Timestamp"] - side_single["Timestamp"]
 
-    # Fit initial model to straighten the diff curve
+    # First pass: straighten the diff curve
     model = LinearRegression().fit(
         side_single["Timestamp"].values.reshape(-1, 1), diff.values
     )
@@ -39,7 +39,7 @@ def adjust_timestamps(side_timestamps, other_timestamps):
     straightened_diff = diff - (slope * side_single["Timestamp"] + intercept)
     correct_diff_idx = np.where(straightened_diff < straightened_diff.mean())
 
-    # Refit on the lower half of the straightened data for a cleaner estimate
+    # Refit on the lower half (drops outlier intervals)
     model_true = LinearRegression().fit(
         side_single["Timestamp"].values[correct_diff_idx].reshape(-1, 1),
         diff.values[correct_diff_idx],
@@ -90,7 +90,7 @@ def match_frames_by_timestamp(timestamps_side, timestamps_front, timestamps_over
 
     matched_frames = (
         matched_all[["Frame_number_side", "Frame_number_front", "Frame_number_overhead"]]
-        .applymap(lambda x: int(x) if pd.notnull(x) else -1)
+        .map(lambda x: int(x) if pd.notnull(x) else -1)
         .values.tolist()
     )
     return matched_frames
