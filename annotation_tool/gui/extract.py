@@ -8,7 +8,10 @@ import cv2
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from annotation_tool import config
+from annotation_tool.config import (
+    DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, FRAME_SAVE_PATH_TEMPLATE,
+    REFERENCE_VIEW, VIEWS,
+)
 from annotation_tool.gui.utils import (
     apply_contrast_brightness, get_video_name_with_view, parse_video_path,
     get_corresponding_video_path,
@@ -26,55 +29,66 @@ class ExtractFramesTool:
         self.video_name = ""
         self.video_date = ""
         self.camera_view = ""
-        self.cap_side = None
-        self.cap_front = None
-        self.cap_overhead = None
+        self.caps = {}
         self.total_frames = 0
         self.current_frame_index = 0
         self.matched_frames = []
-        self.contrast_var = tk.DoubleVar(value=config.DEFAULT_CONTRAST)
-        self.brightness_var = tk.DoubleVar(value=config.DEFAULT_BRIGHTNESS)
+        self.contrast_var = tk.DoubleVar(value=DEFAULT_CONTRAST)
+        self.brightness_var = tk.DoubleVar(value=DEFAULT_BRIGHTNESS)
 
         self.extract_frames()
 
     def extract_frames(self):
         self.main_tool.clear_root()
 
-        self.video_path = filedialog.askopenfilename(title="Select Video File")
+        self.video_path = filedialog.askopenfilename(
+            title=f"Select {REFERENCE_VIEW.capitalize()} Video File"
+        )
         if not self.video_path:
             self.main_tool.main_menu()
             return
 
         self.video_name, self.video_date, self.camera_view = parse_video_path(self.video_path)
+        if self.camera_view != REFERENCE_VIEW:
+            messagebox.showerror(
+                "Wrong Camera View",
+                f"Please select the {REFERENCE_VIEW} video (the reference view "
+                f"configured in config.REFERENCE_VIEW). You picked the "
+                f"{self.camera_view} video.",
+            )
+            self.main_tool.main_menu()
+            return
         self.video_name_stripped = "_".join(self.video_name.split("_")[:-1])
-        self.cap_side = cv2.VideoCapture(self.video_path)
-        self.total_frames = int(self.cap_side.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Open video captures for every view (reference uses the picked path,
+        # others are derived from it).
+        self.caps[REFERENCE_VIEW] = cv2.VideoCapture(self.video_path)
+        for view in VIEWS:
+            if view != REFERENCE_VIEW:
+                self.caps[view] = cv2.VideoCapture(
+                    get_corresponding_video_path(self.video_path, self.camera_view, view)
+                )
+        self.total_frames = int(self.caps[REFERENCE_VIEW].get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame_index = 0
 
-        self.cap_front = cv2.VideoCapture(
-            get_corresponding_video_path(self.video_path, self.camera_view, "front")
-        )
-        self.cap_overhead = cv2.VideoCapture(
-            get_corresponding_video_path(self.video_path, self.camera_view, "overhead")
-        )
+        frame_counts = {v: int(self.caps[v].get(cv2.CAP_PROP_FRAME_COUNT)) for v in VIEWS}
+        print("Total frames - " + ", ".join(
+            f"{v.capitalize()}: {frame_counts[v]}" for v in VIEWS
+        ))
 
-        total_frames_side = int(self.cap_side.get(cv2.CAP_PROP_FRAME_COUNT))
-        total_frames_front = int(self.cap_front.get(cv2.CAP_PROP_FRAME_COUNT))
-        total_frames_overhead = int(self.cap_overhead.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"Total frames - Side: {total_frames_side}, Front: {total_frames_front}, Overhead: {total_frames_overhead}")
+        # Load and synchronize timestamps. The reference view's timeline is
+        # taken as ground truth; each other view's timestamps are linearly
+        # adjusted to align with it.
+        timestamps = {
+            v: zero_timestamps(load_timestamps(self.video_path, self.video_name, v))
+            for v in VIEWS
+        }
+        ts_adj = {REFERENCE_VIEW: timestamps[REFERENCE_VIEW]["Timestamp"].astype(float)}
+        for v in VIEWS:
+            if v != REFERENCE_VIEW:
+                ts_adj[v] = adjust_timestamps(timestamps[REFERENCE_VIEW], timestamps[v])
 
-        # Load and synchronize timestamps
-        timestamps_side = zero_timestamps(load_timestamps(self.video_path, self.video_name, "side"))
-        timestamps_front = zero_timestamps(load_timestamps(self.video_path, self.video_name, "front"))
-        timestamps_overhead = zero_timestamps(load_timestamps(self.video_path, self.video_name, "overhead"))
-
-        timestamps_front_adj = adjust_timestamps(timestamps_side, timestamps_front)
-        timestamps_overhead_adj = adjust_timestamps(timestamps_side, timestamps_overhead)
-        timestamps_side_adj = timestamps_side["Timestamp"].astype(float)
-
-        self.matched_frames = match_frames_by_timestamp(
-            timestamps_side_adj, timestamps_front_adj, timestamps_overhead_adj
-        )
+        self.matched_frames = match_frames_by_timestamp(ts_adj, REFERENCE_VIEW, VIEWS)
 
         self.show_frames_extraction()
 
@@ -90,7 +104,10 @@ class ExtractFramesTool:
         )
         self.slider.pack(side=tk.LEFT, padx=5)
 
-        self.frame_label = tk.Label(control_frame, text=f"Frame: {self.matched_frames[0][0]}")
+        ref_idx = VIEWS.index(REFERENCE_VIEW)
+        self.frame_label = tk.Label(
+            control_frame, text=f"Frame: {self.matched_frames[0][ref_idx]}"
+        )
         self.frame_label.pack(side=tk.LEFT, padx=5)
 
         skip_frame = tk.Frame(self.root)
@@ -125,75 +142,60 @@ class ExtractFramesTool:
         self.slider.set(new_index)
         self.display_frame(new_index)
 
+    def read_matched(self, index):
+        """Read the matched frame for every view at the given matched index.
+
+        Returns dict[view -> BGR image] or None if any view failed to read.
+        """
+        frame_nums = dict(zip(VIEWS, self.matched_frames[index]))
+        imgs = {}
+        for view in VIEWS:
+            self.caps[view].set(cv2.CAP_PROP_POS_FRAMES, frame_nums[view])
+            ret, img = self.caps[view].read()
+            if not ret:
+                return None, frame_nums
+            imgs[view] = img
+        return imgs, frame_nums
+
     def display_frame(self, index):
         self.current_frame_index = index
-        frame_side, frame_front, frame_overhead = self.matched_frames[index]
+        imgs, _ = self.read_matched(index)
+        if imgs is None:
+            return
 
-        self.cap_side.set(cv2.CAP_PROP_POS_FRAMES, frame_side)
-        ret_side, frame_side_img = self.cap_side.read()
+        contrast = self.contrast_var.get()
+        brightness = self.brightness_var.get()
 
-        self.cap_front.set(cv2.CAP_PROP_POS_FRAMES, frame_front)
-        ret_front, frame_front_img = self.cap_front.read()
+        for ax, view in zip(self.axs, VIEWS):
+            adjusted = apply_contrast_brightness(imgs[view], contrast, brightness)
+            ax.cla()
+            ax.imshow(cv2.cvtColor(adjusted, cv2.COLOR_BGR2RGB))
+            ax.set_title(f"{view.capitalize()} View")
 
-        self.cap_overhead.set(cv2.CAP_PROP_POS_FRAMES, frame_overhead)
-        ret_overhead, frame_overhead_img = self.cap_overhead.read()
-
-        if ret_side and ret_front and ret_overhead:
-            contrast = self.contrast_var.get()
-            brightness = self.brightness_var.get()
-            imgs = [
-                apply_contrast_brightness(frame_side_img, contrast, brightness),
-                apply_contrast_brightness(frame_front_img, contrast, brightness),
-                apply_contrast_brightness(frame_overhead_img, contrast, brightness),
-            ]
-            titles = ["Side View", "Front View", "Overhead View"]
-
-            for ax, img, title in zip(self.axs, imgs, titles):
-                ax.cla()
-                ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                ax.set_title(title)
-
-            self.canvas.draw()
+        self.canvas.draw()
 
     def update_frame_label(self, val):
         index = int(val)
-        self.frame_label.config(text=f"Frame: {self.matched_frames[index][0]}")
+        ref_idx = VIEWS.index(REFERENCE_VIEW)
+        self.frame_label.config(text=f"Frame: {self.matched_frames[index][ref_idx]}")
         self.display_frame(index)
 
     def save_extracted_frames(self):
-        frame_side, frame_front, frame_overhead = self.matched_frames[self.current_frame_index]
+        imgs, frame_nums = self.read_matched(self.current_frame_index)
+        if imgs is None:
+            return
 
-        self.cap_side.set(cv2.CAP_PROP_POS_FRAMES, frame_side)
-        ret_side, frame_side_img = self.cap_side.read()
+        video_names = {
+            view: get_video_name_with_view(self.video_name, view)
+            for view in VIEWS
+        }
 
-        self.cap_front.set(cv2.CAP_PROP_POS_FRAMES, frame_front)
-        ret_front, frame_front_img = self.cap_front.read()
+        for view in VIEWS:
+            path = os.path.join(
+                FRAME_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
+                f"img{frame_nums[view]}.png",
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            cv2.imwrite(path, imgs[view])
 
-        self.cap_overhead.set(cv2.CAP_PROP_POS_FRAMES, frame_overhead)
-        ret_overhead, frame_overhead_img = self.cap_overhead.read()
-
-        if ret_side and ret_front and ret_overhead:
-            video_names = {
-                view: get_video_name_with_view(self.video_name, view)
-                for view in ["side", "front", "overhead"]
-            }
-            frame_nums = {"side": frame_side, "front": frame_front, "overhead": frame_overhead}
-
-            for view in ["side", "front", "overhead"]:
-                path = os.path.join(
-                    config.FRAME_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
-                    f"img{frame_nums[view]}.png",
-                )
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-
-            cv2.imwrite(os.path.join(
-                config.FRAME_SAVE_PATH_TEMPLATE["side"].format(video_name=video_names["side"]),
-                f"img{frame_side}.png"), frame_side_img)
-            cv2.imwrite(os.path.join(
-                config.FRAME_SAVE_PATH_TEMPLATE["front"].format(video_name=video_names["front"]),
-                f"img{frame_front}.png"), frame_front_img)
-            cv2.imwrite(os.path.join(
-                config.FRAME_SAVE_PATH_TEMPLATE["overhead"].format(video_name=video_names["overhead"]),
-                f"img{frame_overhead}.png"), frame_overhead_img)
-
-            messagebox.showinfo("Info", "Frames saved successfully")
+        messagebox.showinfo("Info", "Frames saved successfully")

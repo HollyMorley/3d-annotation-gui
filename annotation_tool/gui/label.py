@@ -12,12 +12,17 @@ from matplotlib import pyplot as plt
 from matplotlib.backend_bases import MouseButton
 from scipy.optimize import minimize
 
-from annotation_tool import config
+from annotation_tool.config import (
+    BODY_PART_LABELS, CALIBRATION_LABELS, CALIBRATION_SAVE_PATH_TEMPLATE,
+    DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST, DEFAULT_MARKER_SIZE,
+    LABEL_SAVE_PATH_TEMPLATE, OPTIMIZATION_REFERENCE_LABELS,
+    REFERENCE_LABEL_WEIGHTS, REFERENCE_VIEW, VIEWS,
+)
 from annotation_tool.camera.calibration import BasicCalibration
 from annotation_tool.camera.reconstruction import triangulate
 from annotation_tool.gui.base import BaseAnnotationTool
 from annotation_tool.gui.utils import (
-    VIEWS, view_index, get_video_name_with_view, generate_label_colors,
+    view_index, get_video_name_with_view, generate_label_colors,
     apply_contrast_brightness, extract_date_from_folder_path,
     find_t_for_coordinate, get_line_equation, debounce,
 )
@@ -30,24 +35,24 @@ class LabelFramesTool(BaseAnnotationTool):
         self.video_date = ""
         self.extracted_frames_path = {}
         self.calibration_data = None
-        self.labels = config.BODY_PART_LABELS
-        self.label_colors = generate_label_colors(self.labels, config.CALIBRATION_LABELS)
+        self.labels = BODY_PART_LABELS
+        self.label_colors = generate_label_colors(self.labels, CALIBRATION_LABELS)
         self.current_label = tk.StringVar(value="Nose")
-        self.projection_view = tk.StringVar(value="side")
+        self.projection_view = tk.StringVar(value=REFERENCE_VIEW)
         self.body_part_points = {}
         self.calibration_points_static = {
-            label: {"side": None, "front": None, "overhead": None}
-            for label in config.CALIBRATION_LABELS
+            label: {v: None for v in VIEWS}
+            for label in CALIBRATION_LABELS
         }
         self.cam_reprojected_points = {"near": {}, "far": {}}
-        self.frames = {"side": [], "front": [], "overhead": []}
-        self.projection_lines = {"side": None, "front": None, "overhead": None}
+        self.frames = {v: [] for v in VIEWS}
+        self.projection_lines = {v: None for v in VIEWS}
         self.P = None
         self.tooltip = None
         self.label_buttons = []
         self.tooltip_window = None
-        self.frame_names = {"side": [], "front": [], "overhead": []}
-        self.frame_numbers = {"side": [], "front": [], "overhead": []}
+        self.frame_names = {v: [] for v in VIEWS}
+        self.frame_numbers = {v: [] for v in VIEWS}
 
         self.spacer_lines_active = False
         self.spacer_lines_points = []
@@ -93,7 +98,7 @@ class LabelFramesTool(BaseAnnotationTool):
 
         self.current_frame_index = 0
         self.show_loading_popup()
-        self.frames = {"side": [], "front": [], "overhead": []}
+        self.frames = {v: [] for v in VIEWS}
         self.root.after(100, self.load_frames, enhanced_calibration_file)
 
     def show_loading_popup(self):
@@ -106,7 +111,7 @@ class LabelFramesTool(BaseAnnotationTool):
     def load_frames(self, enhanced_calibration_file):
         valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
 
-        for view in self.frames.keys():
+        for view in VIEWS:
             frame_files = sorted(
                 (f for f in os.listdir(self.extracted_frames_path[view])
                  if os.path.splitext(f)[1].lower() in valid_extensions),
@@ -121,13 +126,14 @@ class LabelFramesTool(BaseAnnotationTool):
                 image_number = int(os.path.splitext(file)[0].replace("img", ""))
                 self.frame_numbers[view].append(image_number)
 
-        min_frame_count = min(len(self.frames[v]) for v in self.frames if self.frames[v])
-        for view in self.frames:
+        min_frame_count = min(len(self.frames[v]) for v in VIEWS if self.frames[v])
+        for view in VIEWS:
             self.frames[view] = self.frames[view][:min_frame_count]
             self.frame_numbers[view] = self.frame_numbers[view][:min_frame_count]
 
-        print(f"Frames loaded - Side: {len(self.frames['side'])}, "
-              f"Front: {len(self.frames['front'])}, Overhead: {len(self.frames['overhead'])}")
+        print("Frames loaded - " + ", ".join(
+            f"{v.capitalize()}: {len(self.frames[v])}" for v in VIEWS
+        ))
 
         if min_frame_count == 0:
             messagebox.showerror("Error", "No frames found in the directories.")
@@ -137,11 +143,11 @@ class LabelFramesTool(BaseAnnotationTool):
         self.loading_popup.destroy()
 
         self.body_part_points = {
-            frame_idx: {label: {"side": None, "front": None, "overhead": None} for label in self.labels}
+            frame_idx: {label: {v: None for v in VIEWS} for label in self.labels}
             for frame_idx in range(min_frame_count)
         }
 
-        self.matched_frames = [(i, i, i) for i in range(min_frame_count)]
+        self.matched_frames = [tuple(i for _ in VIEWS) for i in range(min_frame_count)]
 
         self.setup_labeling_ui()
 
@@ -151,7 +157,7 @@ class LabelFramesTool(BaseAnnotationTool):
         }
         for view in VIEWS:
             label_file_path = os.path.join(
-                config.LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
+                LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
                 "CollectedData_Holly.csv",
             )
             if os.path.exists(label_file_path):
@@ -180,7 +186,7 @@ class LabelFramesTool(BaseAnnotationTool):
 
         self.frame_label = tk.Label(
             frame_control,
-            text=f"Frame: {self.current_frame_index + 1}/{len(self.frames['side'])}",
+            text=f"Frame: {self.current_frame_index + 1}/{len(self.matched_frames)}",
         )
         self.frame_label.pack()
 
@@ -199,11 +205,12 @@ class LabelFramesTool(BaseAnnotationTool):
         tk.Button(button_frame, text="Optimize Calibration",
                   command=self.optimize_calibration).pack(pady=5)
 
-        # View selectors
+        # View selectors. self.current_view and self.projection_view are
+        # already initialized in __init__ (to REFERENCE_VIEW); the radio
+        # buttons bind to those existing StringVars.
         view_frame = tk.Frame(control_frame)
         view_frame.pack(side=tk.RIGHT, padx=10, pady=5)
         tk.Label(view_frame, text="Label View").pack()
-        self.current_view = tk.StringVar(value="side")
         for view in VIEWS:
             tk.Radiobutton(view_frame, text=view.capitalize(),
                            variable=self.current_view, value=view).pack(side=tk.TOP, pady=2)
@@ -211,7 +218,6 @@ class LabelFramesTool(BaseAnnotationTool):
         projection_frame = tk.Frame(control_frame)
         projection_frame.pack(side=tk.RIGHT, padx=10, pady=5)
         tk.Label(projection_frame, text="Projection View").pack()
-        self.projection_view = tk.StringVar(value="side")
         for view in VIEWS:
             tk.Radiobutton(projection_frame, text=view.capitalize(),
                            variable=self.projection_view, value=view).pack(side=tk.TOP, pady=2)
@@ -226,8 +232,8 @@ class LabelFramesTool(BaseAnnotationTool):
         control_frame_labels = tk.Frame(main_frame)
         control_frame_labels.pack(side=tk.RIGHT, fill=tk.Y, padx=3, pady=1)
 
-        self.labels = config.BODY_PART_LABELS
-        self.label_colors = generate_label_colors(self.labels, config.CALIBRATION_LABELS)
+        self.labels = BODY_PART_LABELS
+        self.label_colors = generate_label_colors(self.labels, CALIBRATION_LABELS)
         self.current_label = tk.StringVar(value=self.labels[0])
 
         self.label_canvas = tk.Canvas(control_frame_labels, width=100)
@@ -247,7 +253,7 @@ class LabelFramesTool(BaseAnnotationTool):
 
         for label in self.labels:
             color = self.label_colors[label]
-            if label != "Door" and label in config.CALIBRATION_LABELS:
+            if label != "Door" and label in CALIBRATION_LABELS:
                 continue
             label_button = tk.Radiobutton(
                 self.label_frame_widget, text=label, variable=self.current_label,
@@ -307,13 +313,10 @@ class LabelFramesTool(BaseAnnotationTool):
     # ----- Display -----
 
     def display_frame(self):
-        frame_side, frame_front, frame_overhead = self.matched_frames[self.current_frame_index]
+        frame_nums = dict(zip(VIEWS, self.matched_frames[self.current_frame_index]))
+        imgs = {view: self.frames[view][frame_nums[view]] for view in VIEWS}
 
-        frame_side_img = self.frames["side"][frame_side]
-        frame_front_img = self.frames["front"][frame_front]
-        frame_overhead_img = self.frames["overhead"][frame_overhead]
-
-        self.display_three_views(frame_side_img, frame_front_img, frame_overhead_img)
+        self.display_views(imgs)
         for ax in self.axs:
             ax.set_title(ax.get_title(), fontsize=8)
             ax.tick_params(axis="both", which="both", direction="in",
@@ -325,7 +328,7 @@ class LabelFramesTool(BaseAnnotationTool):
         self.current_label.set("Nose")
         self.update_label_button_selection()
 
-    def _refresh_display(self):
+    def refresh_display(self):
         self.display_frame()
 
     def show_body_part_points(self, draw=True):
@@ -340,7 +343,7 @@ class LabelFramesTool(BaseAnnotationTool):
                     x, y = coords
                     ax = self.axs[view_index(view)]
                     color = self.label_colors[label]
-                    if label in config.CALIBRATION_LABELS:
+                    if label in CALIBRATION_LABELS:
                         ax.scatter(x, y, c=color, s=self.marker_size_var.get() * 10,
                                    label=label, edgecolors="red", linewidths=1)
                     else:
@@ -424,7 +427,7 @@ class LabelFramesTool(BaseAnnotationTool):
             if event.key == "shift":
                 self.delete_closest_point(ax, event, frame_points)
             else:
-                if label == "Door" or label not in config.CALIBRATION_LABELS:
+                if label == "Door" or label not in CALIBRATION_LABELS:
                     frame_points[label][view] = (event.xdata, event.ydata)
                     ax.scatter(event.xdata, event.ydata, c=color, s=marker_size * 10,
                                label=label)
@@ -432,7 +435,7 @@ class LabelFramesTool(BaseAnnotationTool):
                     self.advance_label()
                     self.draw_reprojected_points()
         elif event.button == MouseButton.LEFT:
-            if label == "Door" or label not in config.CALIBRATION_LABELS:
+            if label == "Door" or label not in CALIBRATION_LABELS:
                 self.dragging_point = self.find_closest_point(ax, event, frame_points)
 
     def on_drag(self, event):
@@ -483,7 +486,7 @@ class LabelFramesTool(BaseAnnotationTool):
                         closest_view = view
 
         if closest_label and closest_view:
-            if closest_label == "Door" or closest_label not in config.CALIBRATION_LABELS:
+            if closest_label == "Door" or closest_label not in CALIBRATION_LABELS:
                 frame_points[closest_label][closest_view] = None
                 self.display_frame()
 
@@ -499,10 +502,10 @@ class LabelFramesTool(BaseAnnotationTool):
     def skip_frames(self, step):
         self.current_frame_index += step
         self.current_frame_index = max(0, min(
-            self.current_frame_index, len(self.frames["side"]) - 1
+            self.current_frame_index, len(self.matched_frames) - 1
         ))
         self.frame_label.config(
-            text=f"Frame: {self.current_frame_index + 1}/{len(self.frames['side'])}"
+            text=f"Frame: {self.current_frame_index + 1}/{len(self.matched_frames)}"
         )
         self.display_frame()
         self.current_label.set("Nose")
@@ -515,9 +518,9 @@ class LabelFramesTool(BaseAnnotationTool):
         for ax in self.axs:
             ax.set_xlim(0, ax.get_images()[0].get_array().shape[1])
             ax.set_ylim(ax.get_images()[0].get_array().shape[0], 0)
-        self.contrast_var.set(config.DEFAULT_CONTRAST)
-        self.brightness_var.set(config.DEFAULT_BRIGHTNESS)
-        self.marker_size_var.set(config.DEFAULT_MARKER_SIZE)
+        self.contrast_var.set(DEFAULT_CONTRAST)
+        self.brightness_var.set(DEFAULT_BRIGHTNESS)
+        self.marker_size_var.set(DEFAULT_MARKER_SIZE)
         self.display_frame()
 
     # ----- Spacer lines -----
@@ -682,7 +685,7 @@ class LabelFramesTool(BaseAnnotationTool):
                 "belt points CCS": calib.belt_coords_CCS,
             }
 
-            for label in config.CALIBRATION_LABELS:
+            for label in CALIBRATION_LABELS:
                 for view in VIEWS:
                     x_vals = calibration_coordinates[
                         (calibration_coordinates["bodyparts"] == label)
@@ -716,7 +719,7 @@ class LabelFramesTool(BaseAnnotationTool):
     # ----- Calibration optimization -----
 
     def optimize_calibration(self):
-        reference_points = config.OPTIMIZATION_REFERENCE_LABELS
+        reference_points = OPTIMIZATION_REFERENCE_LABELS
 
         initial_total_error, initial_errors = self.compute_reprojection_error(reference_points)
         print(f"Initial total reprojection error: {initial_total_error}")
@@ -751,7 +754,7 @@ class LabelFramesTool(BaseAnnotationTool):
         self.update_calibration_labels_and_projection()
 
     def compute_reprojection_error(self, labels, extrinsics=None, weighted=False):
-        errors = {label: {"side": 0, "front": 0, "overhead": 0} for label in labels}
+        errors = {label: {v: 0 for v in VIEWS} for label in labels}
         total_error = 0
 
         for label in labels:
@@ -769,7 +772,7 @@ class LabelFramesTool(BaseAnnotationTool):
                                 + (projected_y - original_y) ** 2
                             )
                             if weighted:
-                                weight = config.REFERENCE_LABEL_WEIGHTS.get(label, 1.0)
+                                weight = REFERENCE_LABEL_WEIGHTS.get(label, 1.0)
                                 error *= weight
                             errors[label][view] = error
                             total_error += error
@@ -808,7 +811,7 @@ class LabelFramesTool(BaseAnnotationTool):
 
     def flatten_calibration_points(self):
         flat_points = []
-        for label in config.CALIBRATION_LABELS:
+        for label in CALIBRATION_LABELS:
             for view in VIEWS:
                 if self.calibration_points_static[label][view] is not None:
                     flat_points.extend(self.calibration_points_static[label][view])
@@ -816,11 +819,11 @@ class LabelFramesTool(BaseAnnotationTool):
 
     def reshape_calibration_points(self, flat_points):
         calibration_points = {
-            label: {"side": None, "front": None, "overhead": None}
-            for label in config.CALIBRATION_LABELS
+            label: {v: None for v in VIEWS}
+            for label in CALIBRATION_LABELS
         }
         i = 0
-        for label in config.CALIBRATION_LABELS:
+        for label in CALIBRATION_LABELS:
             for view in VIEWS:
                 if self.calibration_points_static[label][view] is not None:
                     calibration_points[label][view] = [flat_points[i], flat_points[i + 1]]
@@ -840,9 +843,7 @@ class LabelFramesTool(BaseAnnotationTool):
         calibration_coordinates = pd.DataFrame([
             {
                 "bodyparts": label, "coords": coord,
-                "side": calibration_points[label]["side"][i],
-                "front": calibration_points[label]["front"][i],
-                "overhead": calibration_points[label]["overhead"][i],
+                **{v: calibration_points[label][v][i] for v in VIEWS},
             }
             for label in calibration_points
             for i, coord in enumerate(["x", "y"])
@@ -854,9 +855,7 @@ class LabelFramesTool(BaseAnnotationTool):
         calibration_coordinates = pd.DataFrame([
             {
                 "bodyparts": label, "coords": coord,
-                "side": self.calibration_points_static[label]["side"][i],
-                "front": self.calibration_points_static[label]["front"][i],
-                "overhead": self.calibration_points_static[label]["overhead"][i],
+                **{v: self.calibration_points_static[label][v][i] for v in VIEWS},
             }
             for label in self.calibration_points_static
             for i, coord in enumerate(["x", "y"])
@@ -871,14 +870,16 @@ class LabelFramesTool(BaseAnnotationTool):
         }
 
     def save_optimized_calibration_points(self):
-        calibration_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+        calibration_path = CALIBRATION_SAVE_PATH_TEMPLATE.format(
             video_name=self.video_name
         ).replace(".csv", "_enhanced.csv")
         os.makedirs(os.path.dirname(calibration_path), exist_ok=True)
 
-        data = {"bodyparts": [], "coords": [], "side": [], "front": [], "overhead": []}
+        data = {"bodyparts": [], "coords": []}
+        for v in VIEWS:
+            data[v] = []
         for label, coords in self.calibration_points_static.items():
-            if label in config.CALIBRATION_LABELS:
+            if label in CALIBRATION_LABELS:
                 for coord in ["x", "y"]:
                     data["bodyparts"].append(label)
                     data["coords"].append(coord)
@@ -898,7 +899,7 @@ class LabelFramesTool(BaseAnnotationTool):
             messagebox.showerror("Error", f"Unable to save: {calibration_path}")
 
     def update_calibration_labels_and_projection(self):
-        enhanced_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+        enhanced_path = CALIBRATION_SAVE_PATH_TEMPLATE.format(
             video_name=self.video_name
         ).replace(".csv", "_enhanced.csv")
         if os.path.exists(enhanced_path):
@@ -917,7 +918,7 @@ class LabelFramesTool(BaseAnnotationTool):
         }
         save_paths = {
             view: os.path.join(
-                config.LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
+                LABEL_SAVE_PATH_TEMPLATE[view].format(video_name=video_names[view]),
                 "CollectedData_Holly.csv",
             )
             for view in VIEWS

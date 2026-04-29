@@ -2,6 +2,17 @@
 # Set this to the root directory where your data is stored.
 dir = r"C:\Users\hmorl\OneDrive\Desktop\MultiCamLabelling_pilotdata"
 
+# Camera views, in canonical order. Order is preserved in matched-frame lists
+# and in the 3-panel display. Adding a view here makes it discoverable
+# everywhere; removing one removes it everywhere.
+VIEWS = ["side", "front", "overhead"]
+
+# The reference view for timestamp synchronization. Other cameras' clocks are
+# aligned to this view's via linear regression in sync.adjust_timestamps.
+# Pick the camera with the most reliable clock and fewest dropped frames.
+# This is also the view whose video file the user picks in the file dialog.
+REFERENCE_VIEW = "side"
+
 # Paths
 DEFAULT_CALIBRATION_FILE_PATH = "%s/CameraCalibration/default_calibration_labels.csv" % (dir)
 CALIBRATION_SAVE_PATH_TEMPLATE = "%s/CameraCalibration/{video_name}/calibration_labels.csv" % (dir)

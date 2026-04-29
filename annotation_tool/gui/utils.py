@@ -3,7 +3,7 @@
 import os
 import time
 
-VIEWS = ["side", "front", "overhead"]
+from annotation_tool.config import VIEWS
 
 
 def view_index(view):

@@ -52,44 +52,41 @@ def adjust_timestamps(side_timestamps, other_timestamps):
     return adjusted
 
 
-def match_frames_by_timestamp(timestamps_side, timestamps_front, timestamps_overhead):
-    """Match frames across three cameras using nearest-timestamp merge.
+def match_frames_by_timestamp(timestamps_by_view, reference_view, views_order):
+    """Match frames across N cameras using nearest-timestamp merge.
 
-    Returns a list of (side_frame, front_frame, overhead_frame) tuples.
-    Unmatched frames are set to -1.
+    timestamps_by_view: dict mapping view name -> Series of adjusted timestamps.
+    reference_view: which view anchors the merge (each other view is merged
+        into the reference's timeline).
+    views_order: list of views defining the order of frame numbers in each
+        returned tuple.
+
+    Returns a list of tuples (one entry per view in views_order) with the
+    matched frame number for that view, or -1 when no frame matched within
+    tolerance.
     """
     buffer_ns = int(4.04e+6)
 
-    timestamps_side = timestamps_side.sort_values().reset_index(drop=True)
-    timestamps_front = timestamps_front.sort_values().reset_index(drop=True)
-    timestamps_overhead = timestamps_overhead.sort_values().reset_index(drop=True)
+    dfs = {}
+    for view in views_order:
+        ts = timestamps_by_view[view].sort_values().reset_index(drop=True)
+        dfs[view] = pd.DataFrame({
+            "Timestamp": ts,
+            f"Frame_number_{view}": range(len(ts)),
+        })
 
-    side_df = pd.DataFrame({
-        "Timestamp": timestamps_side,
-        "Frame_number_side": range(len(timestamps_side)),
-    })
-    front_df = pd.DataFrame({
-        "Timestamp": timestamps_front,
-        "Frame_number_front": range(len(timestamps_front)),
-    })
-    overhead_df = pd.DataFrame({
-        "Timestamp": timestamps_overhead,
-        "Frame_number_overhead": range(len(timestamps_overhead)),
-    })
+    matched = dfs[reference_view]
+    for view in views_order:
+        if view == reference_view:
+            continue
+        matched = pd.merge_asof(
+            matched, dfs[view], on="Timestamp",
+            direction="nearest", tolerance=buffer_ns,
+        )
 
-    matched_front = pd.merge_asof(
-        side_df, front_df, on="Timestamp",
-        direction="nearest", tolerance=buffer_ns,
-        suffixes=("_side", "_front"),
-    )
-    matched_all = pd.merge_asof(
-        matched_front, overhead_df, on="Timestamp",
-        direction="nearest", tolerance=buffer_ns,
-        suffixes=("_side", "_overhead"),
-    )
-
+    frame_cols = [f"Frame_number_{v}" for v in views_order]
     matched_frames = (
-        matched_all[["Frame_number_side", "Frame_number_front", "Frame_number_overhead"]]
+        matched[frame_cols]
         .map(lambda x: int(x) if pd.notnull(x) else -1)
         .values.tolist()
     )

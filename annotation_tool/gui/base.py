@@ -3,26 +3,30 @@
 import tkinter as tk
 
 import cv2
-import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from annotation_tool import config
-from annotation_tool.gui.utils import VIEWS, view_index, apply_contrast_brightness
+from annotation_tool.config import (
+    BRIGHTNESS_STEP, CONTRAST_STEP, DEFAULT_BRIGHTNESS, DEFAULT_CONTRAST,
+    DEFAULT_MARKER_SIZE, MARKER_SIZE_STEP, MAX_BRIGHTNESS, MAX_CONTRAST,
+    MAX_MARKER_SIZE, MIN_BRIGHTNESS, MIN_CONTRAST, MIN_MARKER_SIZE,
+    REFERENCE_VIEW, VIEWS,
+)
+from annotation_tool.gui.utils import view_index, apply_contrast_brightness
 
 
 class BaseAnnotationTool:
     """Shared state, UI setup and mouse handling for the calibration and
-    body-part labelling tools. Subclasses must implement _refresh_display,
+    body-part labelling tools. Subclasses must implement refresh_display,
     on_click, on_drag, and skip_frames."""
 
     def __init__(self, root, main_tool):
         self.root = root
         self.main_tool = main_tool
-        self.contrast_var = tk.DoubleVar(value=config.DEFAULT_CONTRAST)
-        self.brightness_var = tk.DoubleVar(value=config.DEFAULT_BRIGHTNESS)
-        self.marker_size_var = tk.DoubleVar(value=config.DEFAULT_MARKER_SIZE)
-        self.current_view = tk.StringVar(value="side")
+        self.contrast_var = tk.DoubleVar(value=DEFAULT_CONTRAST)
+        self.brightness_var = tk.DoubleVar(value=DEFAULT_BRIGHTNESS)
+        self.marker_size_var = tk.DoubleVar(value=DEFAULT_MARKER_SIZE)
+        self.current_view = tk.StringVar(value=REFERENCE_VIEW)
         self.crosshair_lines = []
         self.dragging_point = None
         self.panning = False
@@ -41,22 +45,22 @@ class BaseAnnotationTool:
 
         tk.Label(settings_frame, text="Marker Size").pack(side=tk.LEFT, padx=5)
         tk.Scale(
-            settings_frame, from_=config.MIN_MARKER_SIZE, to=config.MAX_MARKER_SIZE,
-            orient=tk.HORIZONTAL, resolution=config.MARKER_SIZE_STEP,
+            settings_frame, from_=MIN_MARKER_SIZE, to=MAX_MARKER_SIZE,
+            orient=tk.HORIZONTAL, resolution=MARKER_SIZE_STEP,
             variable=self.marker_size_var, command=self.update_marker_size,
         ).pack(side=tk.LEFT, padx=5)
 
         tk.Label(settings_frame, text="Contrast").pack(side=tk.LEFT, padx=5)
         tk.Scale(
-            settings_frame, from_=config.MIN_CONTRAST, to=config.MAX_CONTRAST,
-            orient=tk.HORIZONTAL, resolution=config.CONTRAST_STEP,
+            settings_frame, from_=MIN_CONTRAST, to=MAX_CONTRAST,
+            orient=tk.HORIZONTAL, resolution=CONTRAST_STEP,
             variable=self.contrast_var, command=self.update_contrast_brightness,
         ).pack(side=tk.LEFT, padx=5)
 
         tk.Label(settings_frame, text="Brightness").pack(side=tk.LEFT, padx=5)
         tk.Scale(
-            settings_frame, from_=config.MIN_BRIGHTNESS, to=config.MAX_BRIGHTNESS,
-            orient=tk.HORIZONTAL, resolution=config.BRIGHTNESS_STEP,
+            settings_frame, from_=MIN_BRIGHTNESS, to=MAX_BRIGHTNESS,
+            orient=tk.HORIZONTAL, resolution=BRIGHTNESS_STEP,
             variable=self.brightness_var, command=self.update_contrast_brightness,
         ).pack(side=tk.LEFT, padx=5)
 
@@ -89,21 +93,20 @@ class BaseAnnotationTool:
             button = tk.Button(parent, text=text, command=lambda s=step: self.skip_frames(s))
             button.grid(row=0, column=i, padx=5)
 
-    def display_three_views(self, frame_side, frame_front, frame_overhead):
-        """Clear axes and display three BGR frames with contrast/brightness applied."""
+    def display_views(self, frames_by_view):
+        """Clear axes and display each view's BGR frame with contrast/brightness applied.
+
+        frames_by_view: dict mapping view name -> BGR image. Views are rendered
+        in the canonical order defined by VIEWS.
+        """
         contrast = self.contrast_var.get()
         brightness = self.brightness_var.get()
-        frames = [
-            apply_contrast_brightness(frame_side, contrast, brightness),
-            apply_contrast_brightness(frame_front, contrast, brightness),
-            apply_contrast_brightness(frame_overhead, contrast, brightness),
-        ]
-        titles = ["Side View", "Front View", "Overhead View"]
 
-        for ax, frame, title in zip(self.axs, frames, titles):
+        for ax, view in zip(self.axs, VIEWS):
+            adjusted = apply_contrast_brightness(frames_by_view[view], contrast, brightness)
             ax.cla()
-            ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            ax.set_title(title)
+            ax.imshow(cv2.cvtColor(adjusted, cv2.COLOR_BGR2RGB))
+            ax.set_title(f"{view.capitalize()} View")
 
     def on_scroll(self, event):
         if event.inaxes:
@@ -154,24 +157,24 @@ class BaseAnnotationTool:
     def update_marker_size(self, val):
         current_xlim = [ax.get_xlim() for ax in self.axs]
         current_ylim = [ax.get_ylim() for ax in self.axs]
-        self._refresh_display()
+        self.refresh_display()
         for ax, xlim, ylim in zip(self.axs, current_xlim, current_ylim):
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
         self.canvas.draw_idle()
 
     def update_contrast_brightness(self, val):
-        self._refresh_display()
+        self.refresh_display()
 
     def reset_view(self):
         for ax in self.axs:
             ax.set_xlim(0, 1)
             ax.set_ylim(0, 1)
-        self.contrast_var.set(config.DEFAULT_CONTRAST)
-        self.brightness_var.set(config.DEFAULT_BRIGHTNESS)
-        self._refresh_display()
+        self.contrast_var.set(DEFAULT_CONTRAST)
+        self.brightness_var.set(DEFAULT_BRIGHTNESS)
+        self.refresh_display()
 
-    def _refresh_display(self):
+    def refresh_display(self):
         raise NotImplementedError
 
     def on_click(self, event):

@@ -9,10 +9,14 @@ import numpy as np
 import pandas as pd
 from matplotlib.backend_bases import MouseButton
 
-from annotation_tool import config
+from annotation_tool.config import (
+    CALIBRATION_LABELS, CALIBRATION_SAVE_PATH_TEMPLATE,
+    DEFAULT_CALIBRATION_FILE_PATH, REFERENCE_VIEW, VIEWS,
+)
 from annotation_tool.gui.base import BaseAnnotationTool
 from annotation_tool.gui.utils import (
-    parse_video_path, get_corresponding_video_path, generate_label_colors, view_index,
+    parse_video_path, get_corresponding_video_path,
+    generate_label_colors, view_index,
 )
 from annotation_tool.gui.sync import (
     load_timestamps, zero_timestamps, adjust_timestamps, match_frames_by_timestamp,
@@ -26,14 +30,12 @@ class CalibrateCamerasTool(BaseAnnotationTool):
         self.video_name = ""
         self.video_date = ""
         self.camera_view = ""
-        self.cap_side = None
-        self.cap_front = None
-        self.cap_overhead = None
+        self.caps = {}
         self.total_frames = 0
         self.mode = "calibration"
 
         self.calibration_points_static = {}
-        self.labels = config.CALIBRATION_LABELS
+        self.labels = CALIBRATION_LABELS
         self.label_colors = generate_label_colors(self.labels)
         self.current_label = tk.StringVar(value=self.labels[0])
 
@@ -42,41 +44,51 @@ class CalibrateCamerasTool(BaseAnnotationTool):
     def calibrate_cameras_menu(self):
         self.main_tool.clear_root()
 
-        self.video_path = filedialog.askopenfilename(title="Select Video File")
+        self.video_path = filedialog.askopenfilename(
+            title=f"Select {REFERENCE_VIEW.capitalize()} Video File"
+        )
         if not self.video_path:
             self.main_tool.main_menu()
             return
 
         self.video_name, self.video_date, self.camera_view = parse_video_path(self.video_path)
-        self.cap_side = cv2.VideoCapture(self.video_path)
-        self.total_frames = int(self.cap_side.get(cv2.CAP_PROP_FRAME_COUNT))
+        if self.camera_view != REFERENCE_VIEW:
+            messagebox.showerror(
+                "Wrong Camera View",
+                f"Please select the {REFERENCE_VIEW} video (the reference view "
+                f"configured in config.REFERENCE_VIEW). You picked the "
+                f"{self.camera_view} video.",
+            )
+            self.main_tool.main_menu()
+            return
+
+        self.caps[REFERENCE_VIEW] = cv2.VideoCapture(self.video_path)
+        for view in VIEWS:
+            if view != REFERENCE_VIEW:
+                self.caps[view] = cv2.VideoCapture(
+                    get_corresponding_video_path(self.video_path, self.camera_view, view)
+                )
+        self.total_frames = int(self.caps[REFERENCE_VIEW].get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame_index = 0
 
-        self.cap_front = cv2.VideoCapture(
-            get_corresponding_video_path(self.video_path, self.camera_view, "front")
-        )
-        self.cap_overhead = cv2.VideoCapture(
-            get_corresponding_video_path(self.video_path, self.camera_view, "overhead")
-        )
+        # Load and synchronize timestamps. Reference view anchors the merge;
+        # other views are linearly adjusted to align with it.
+        timestamps = {
+            v: zero_timestamps(load_timestamps(self.video_path, self.video_name, v))
+            for v in VIEWS
+        }
+        ts_adj = {REFERENCE_VIEW: timestamps[REFERENCE_VIEW]["Timestamp"].astype(float)}
+        for v in VIEWS:
+            if v != REFERENCE_VIEW:
+                ts_adj[v] = adjust_timestamps(timestamps[REFERENCE_VIEW], timestamps[v])
 
-        # Load and synchronize timestamps
-        timestamps_side = zero_timestamps(load_timestamps(self.video_path, self.video_name, "side"))
-        timestamps_front = zero_timestamps(load_timestamps(self.video_path, self.video_name, "front"))
-        timestamps_overhead = zero_timestamps(load_timestamps(self.video_path, self.video_name, "overhead"))
+        self.matched_frames = match_frames_by_timestamp(ts_adj, REFERENCE_VIEW, VIEWS)
 
-        timestamps_front_adj = adjust_timestamps(timestamps_side, timestamps_front)
-        timestamps_overhead_adj = adjust_timestamps(timestamps_side, timestamps_overhead)
-        timestamps_side_adj = timestamps_side["Timestamp"].astype(float)
-
-        self.matched_frames = match_frames_by_timestamp(
-            timestamps_side_adj, timestamps_front_adj, timestamps_overhead_adj
-        )
-
-        self.calibration_file_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+        self.calibration_file_path = CALIBRATION_SAVE_PATH_TEMPLATE.format(
             video_name=self.video_name
         )
         enhanced_calibration_file = self.calibration_file_path.replace(".csv", "_enhanced.csv")
-        default_calibration_file = config.DEFAULT_CALIBRATION_FILE_PATH
+        default_calibration_file = DEFAULT_CALIBRATION_FILE_PATH
 
         # Build UI
         main_frame = tk.Frame(self.root)
@@ -126,7 +138,7 @@ class CalibrateCamerasTool(BaseAnnotationTool):
                 value=label, indicatoron=0, width=20,
             ).pack(side=tk.LEFT)
 
-        for view in ["side", "front", "overhead"]:
+        for view in VIEWS:
             tk.Radiobutton(
                 control_frame_right, text=view.capitalize(),
                 variable=self.current_view, value=view,
@@ -136,7 +148,7 @@ class CalibrateCamerasTool(BaseAnnotationTool):
         self.connect_mouse_events()
 
         self.calibration_points_static = {
-            label: {"side": None, "front": None, "overhead": None}
+            label: {v: None for v in VIEWS}
             for label in self.labels
         }
 
@@ -177,7 +189,7 @@ class CalibrateCamerasTool(BaseAnnotationTool):
             df = pd.read_csv(file_path)
             df.set_index(["bodyparts", "coords"], inplace=True)
             for label in df.index.levels[0]:
-                for view in ["side", "front", "overhead"]:
+                for view in VIEWS:
                     if not pd.isna(df.loc[(label, "x"), view]):
                         x, y = df.loc[(label, "x"), view], df.loc[(label, "y"), view]
                         self.calibration_points_static[label][view] = self.axs[
@@ -197,33 +209,30 @@ class CalibrateCamerasTool(BaseAnnotationTool):
 
     def skip_frames(self, step):
         new_index = self.current_frame_index + step
-        new_index = max(0, min(new_index, self.total_frames - 1))
+        new_index = max(0, min(new_index, len(self.matched_frames) - 1))
         self.current_frame_index = new_index
         self.slider.set(new_index)
-        self.frame_label.config(text=f"Frame: {new_index}/{self.total_frames - 1}")
+        self.frame_label.config(text=f"Frame: {new_index}/{len(self.matched_frames) - 1}")
         self.show_frames()
 
     def show_frames(self, val=None):
         frame_number = self.current_frame_index
         self.frame_label.config(text=f"Frame: {frame_number}/{len(self.matched_frames) - 1}")
 
-        frame_side, frame_front, frame_overhead = self.matched_frames[frame_number]
+        frame_nums = dict(zip(VIEWS, self.matched_frames[frame_number]))
+        imgs = {}
+        for view in VIEWS:
+            self.caps[view].set(cv2.CAP_PROP_POS_FRAMES, frame_nums[view])
+            ret, img = self.caps[view].read()
+            if not ret:
+                return
+            imgs[view] = img
 
-        self.cap_side.set(cv2.CAP_PROP_POS_FRAMES, frame_side)
-        ret_side, frame_side_img = self.cap_side.read()
+        self.display_views(imgs)
+        self.show_static_points()
+        self.canvas.draw_idle()
 
-        self.cap_front.set(cv2.CAP_PROP_POS_FRAMES, frame_front)
-        ret_front, frame_front_img = self.cap_front.read()
-
-        self.cap_overhead.set(cv2.CAP_PROP_POS_FRAMES, frame_overhead)
-        ret_overhead, frame_overhead_img = self.cap_overhead.read()
-
-        if ret_side and ret_front and ret_overhead:
-            self.display_three_views(frame_side_img, frame_front_img, frame_overhead_img)
-            self.show_static_points()
-            self.canvas.draw_idle()
-
-    def _refresh_display(self):
+    def refresh_display(self):
         self.show_frames()
 
     def show_static_points(self):
@@ -236,17 +245,19 @@ class CalibrateCamerasTool(BaseAnnotationTool):
         self.canvas.draw()
 
     def save_calibration_points(self):
-        calibration_path = config.CALIBRATION_SAVE_PATH_TEMPLATE.format(
+        calibration_path = CALIBRATION_SAVE_PATH_TEMPLATE.format(
             video_name=self.video_name
         )
         os.makedirs(os.path.dirname(calibration_path), exist_ok=True)
 
-        data = {"bodyparts": [], "coords": [], "side": [], "front": [], "overhead": []}
+        data = {"bodyparts": [], "coords": []}
+        for v in VIEWS:
+            data[v] = []
         for label, coords in self.calibration_points_static.items():
             for coord in ["x", "y"]:
                 data["bodyparts"].append(label)
                 data["coords"].append(coord)
-                for view in ["side", "front", "overhead"]:
+                for view in VIEWS:
                     if coords[view] is not None:
                         x, y = coords[view].get_offsets()[0]
                         data[view].append(x if coord == "x" else y)
